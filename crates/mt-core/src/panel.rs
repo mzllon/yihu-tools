@@ -158,15 +158,28 @@ pub fn read_keybinding_list() -> io::Result<String> {
 
 /// 合并注册快捷键：列表追加我们的路径，并写入 name/command/binding。
 /// `command` 应为绝对路径 + 子命令（如 `<安装目录>/yihu-panel toggle`）。
+/// 若与 GNOME 内置键冲突（「激活窗口菜单」默认即 `<Alt>space`，会抢先拦截），
+/// 注册时自动解除该内置占用（可用 `gsettings reset` 随时恢复）。
 pub fn register_hotkey(hotkey: &str, command: &str) -> io::Result<()> {
     let existing = read_keybinding_list()?;
     let merged = merge_keybinding_list(&existing, KEYBINDING_PATH)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    clear_wm_conflict(hotkey)?;
     run_gsettings(&["set", SCHEMA, LIST_KEY, &merged])?;
     let base = format!("{SCHEMA_KEY}:{KEYBINDING_PATH}");
     run_gsettings(&["set", &base, "name", PANEL_NAME])?;
     run_gsettings(&["set", &base, "command", command])?;
     run_gsettings(&["set", &base, "binding", hotkey])
+}
+
+/// GNOME 内置键与请求的热键相同时，清空之（Windows 惯例的 Alt+Space 正撞此键）。
+fn clear_wm_conflict(hotkey: &str) -> io::Result<()> {
+    const WM_KEYBINDINGS: &str = "org.gnome.desktop.wm.keybindings";
+    let cur = read_gsettings(&["get", WM_KEYBINDINGS, "activate-window-menu"])?;
+    if cur.contains(hotkey) {
+        run_gsettings(&["set", WM_KEYBINDINGS, "activate-window-menu", "[]"])?;
+    }
+    Ok(())
 }
 
 /// 移除注册：从列表摘除我们的路径并 reset 三个键（对未注册场景幂等）。

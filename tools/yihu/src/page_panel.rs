@@ -94,8 +94,9 @@ pub fn build_page() -> gtk::Widget {
     hk_card.append(&hotkey_result);
     let hk_hint = Label::new(Some(
         "注册会写入 GNOME「设置 → 键盘 → 自定义快捷键」：追加本面板一条记录，\
-         不改动其他快捷键；Wayland 下由系统层触发 yihu-panel toggle。\
-         若与其他自定义快捷键冲突，请在系统设置中调整。",
+         不改动其他自定义快捷键；Wayland 下由系统层触发 yihu-panel toggle。\
+         若快捷键与 GNOME 内置键冲突（如默认的 Alt+Space「窗口菜单」），\
+         注册时会自动解除内置占用。",
     ));
     hk_hint.add_css_class("dim-label");
     hk_hint.add_css_class("caption-sm");
