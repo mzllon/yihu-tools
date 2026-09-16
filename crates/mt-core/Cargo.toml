@@ -6,4 +6,5 @@ description = "MiniTools 共享核心库：Linux 系统信息读取"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 libc = "0.2"

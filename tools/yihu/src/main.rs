@@ -25,15 +25,64 @@ use gtk::{
     ScrolledWindow, Stack, StackTransitionType,
 };
 use gtk::glib;
+use std::cell::RefCell;
 
 const APP_ID: &str = "tools.yihu.desktop";
+/// 侧边栏行序 = stack 页序（呼出面板 --page 深链也按这个名字寻址）
+const PAGES: &[&str] = &["autodark", "clipboard", "apps", "radio", "panel", "settings", "about"];
+
+thread_local! {
+    /// 已构建界面的句柄：命令行转发（--page 深链 / 二次启动置前）需要它。
+    /// GTK 主循环单线程，用 thread_local 而非 static。
+    static UI: RefCell<Option<(Stack, ApplicationWindow)>> = const { RefCell::new(None) };
+}
 
 fn main() -> glib::ExitCode {
     // 全家统一约定：软件渲染压内存
     std::env::set_var("GSK_RENDERER", "cairo");
-    let app = Application::builder().application_id(APP_ID).build();
-    app.connect_activate(build_ui);
+    let app = Application::builder()
+        .application_id(APP_ID)
+        .flags(adw::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
+    app.add_main_option(
+        "page",
+        glib::Char::from(b'p'),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::String,
+        "打开指定页面",
+        Some("页面名"),
+    );
+    app.connect_command_line(handle_command_line);
+    // 防御：HANDLES_COMMAND_LINE 下正常不会触发 activate，真触发时兜底建 UI
+    app.connect_activate(|app| {
+        if !ui_built() {
+            build_ui(app);
+        }
+    });
     app.run()
+}
+
+fn ui_built() -> bool {
+    UI.with_borrow(|ui| ui.is_some())
+}
+
+/// 首次调用构建界面；之后转发 --page 深链并把窗口置前。
+fn handle_command_line(app: &Application, cmd: &adw::gio::ApplicationCommandLine) -> i32 {
+    let page = cmd.options_dict().lookup::<String>("page").ok().flatten();
+    if !ui_built() {
+        build_ui(app);
+    }
+    UI.with_borrow(|ui| {
+        if let Some((stack, window)) = ui.as_ref() {
+            if let Some(p) = page.as_deref() {
+                if PAGES.contains(&p) {
+                    stack.set_visible_child_name(p);
+                }
+            }
+            window.present();
+        }
+    });
+    0
 }
 
 fn build_ui(app: &Application) {
@@ -105,7 +154,7 @@ fn build_ui(app: &Application) {
     // 页面切换（侧边栏行序 = stack 页序）
     {
         let stack = stack.clone();
-        let names: &[&str] = &["autodark", "clipboard", "apps", "radio", "panel", "settings", "about"];
+        let names: &[&str] = PAGES;
         list.connect_row_selected(move |_, row| {
             if let Some(row) = row {
                 if let Some(name) = names.get(row.index().max(0) as usize) {
@@ -137,6 +186,7 @@ fn build_ui(app: &Application) {
             window.present();
         }));
     }
+    UI.with_borrow_mut(|ui| *ui = Some((stack.clone(), window.clone())));
     window.present();
 }
 

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+mt-core = { path = "../../crates/mt-core" }
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
 zbus = "4"
 nucleo = "0.5"

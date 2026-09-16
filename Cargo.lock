@@ -1166,6 +1166,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2150,6 +2151,7 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "libc",
+ "mt-core",
  "nucleo",
  "zbus 4.4.0",
 ]

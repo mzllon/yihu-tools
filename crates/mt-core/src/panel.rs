@@ -9,6 +9,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
+
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_HOTKEY: &str = "<Alt>space";
 /// 本项目快捷键在 relocatable schema 下的固定路径
@@ -210,6 +213,84 @@ pub fn registered_hotkey() -> Option<String> {
     (!s.is_empty() && s != "@ss ''").then(|| s.to_string())
 }
 
+// ---- 使用历史（默认集「最近使用」的数据源）----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub id: String,
+    pub count: u32,
+    /// 最近一次使用的 Unix 秒
+    pub last: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct History {
+    #[serde(default)]
+    pub entries: Vec<HistoryEntry>,
+}
+
+impl History {
+    pub fn path() -> PathBuf {
+        let home = std::env::var("XDG_CONFIG_HOME").ok().filter(|v| !v.is_empty());
+        let base = match home {
+            Some(h) => PathBuf::from(h),
+            None => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+                .join(".config"),
+        };
+        base.join("minitools/panel_history.json")
+    }
+
+    pub fn load() -> History {
+        fs::read_to_string(Self::path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) -> io::Result<()> {
+        let p = Self::path();
+        if let Some(dir) = p.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(p, serde_json::to_string(self).unwrap_or_default())
+    }
+
+    /// 记一次使用（存在则累加并刷新时间，不存在则新增）。
+    pub fn bump(&mut self, id: &str) {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        match self.entries.iter_mut().find(|e| e.id == id) {
+            Some(e) => {
+                e.count += 1;
+                e.last = now;
+            }
+            None => self.entries.push(HistoryEntry {
+                id: id.to_string(),
+                count: 1,
+                last: now,
+            }),
+        }
+    }
+
+    pub fn count_of(&self, id: &str) -> u32 {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.count)
+            .unwrap_or(0)
+    }
+
+    pub fn last_of(&self, id: &str) -> u64 {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.last)
+            .unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +361,25 @@ mod tests {
         let c = Config::read_from(&p).unwrap();
         assert_eq!(c.hotkey, DEFAULT_HOTKEY);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_bump_and_roundtrip() {
+        let mut h = History::default();
+        h.bump("app:a.desktop");
+        h.bump("app:a.desktop");
+        h.bump("cap:center");
+        assert_eq!(h.count_of("app:a.desktop"), 2);
+        assert_eq!(h.count_of("cap:center"), 1);
+        assert_eq!(h.count_of("missing"), 0);
+        // 序列化 roundtrip（load/save 只是文件封装，纯格式在此验证）
+        let text = serde_json::to_string(&h).unwrap();
+        let loaded: History = serde_json::from_str(&text).unwrap();
+        assert_eq!(loaded.count_of("app:a.desktop"), 2);
+        assert_eq!(loaded.count_of("cap:center"), 1);
+        // 损坏文本回退空历史（load 的 unwrap_or_default 行为）
+        let bad: Result<History, _> = serde_json::from_str("not json");
+        assert!(bad.is_err());
+        assert!(History::default().entries.is_empty());
     }
 }
