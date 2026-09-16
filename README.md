@@ -215,6 +215,25 @@ procps、ldd、systemd 用户登录会话及 GTK/libadwaita/DBus 运行库。
 断电/SIGKILL 不保证自动回滚。回滚自身失败时输出保留的临时备份目录。
 旧 `scripts/install.sh` 现在仅显示发布包安装步骤，不再修改桌面或退出 Nautilus。
 
+## 呼出面板排障
+
+**注册成功但按快捷键没反应**：多半是按键被别的程序占用。最常见的是 GNOME
+内置「激活窗口菜单」——它默认就占着 `Alt+Space`，系统把按键先截走了。
+中心「呼出面板」页的「**注册到系统**」按钮会自动处理：解除内置占用 +
+强制系统重新抓取按键（gsd-media-keys 抓取失败后不会自行重试，这是真机
+踩过的坑）。仍无效时依次检查：
+
+```bash
+# 1. 内置键是否已让位（期望输出 @as []）
+gsettings get org.gnome.desktop.wm.keybindings activate-window-menu
+# 2. 面板是否在注册表中
+gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings
+# 3. 手动执行注册的命令本身是否可用（应呼出/隐藏面板）
+~/.local/lib/yihu/yihu-panel toggle
+```
+
+恢复被解除的内置键：`gsettings reset org.gnome.desktop.wm.keybindings activate-window-menu`。
+
 ## 新增一个能力的步骤
 
 1. 执行端视形态新增（中心页面 / 无 UI agent / Nautilus 扩展）；

@@ -158,18 +158,26 @@ pub fn read_keybinding_list() -> io::Result<String> {
 
 /// 合并注册快捷键：列表追加我们的路径，并写入 name/command/binding。
 /// `command` 应为绝对路径 + 子命令（如 `<安装目录>/yihu-panel toggle`）。
-/// 若与 GNOME 内置键冲突（「激活窗口菜单」默认即 `<Alt>space`，会抢先拦截），
-/// 注册时自动解除该内置占用（可用 `gsettings reset` 随时恢复）。
+///
+/// 真机踩坑（2026-09-16）：注册成功但按下无反应，有两层原因——
+/// ① GNOME 内置「激活窗口菜单」默认占用 `<Alt>space`，mutter 会先行拦截；
+/// ② 清除内置占用后，gsd-media-keys 不会自动重试按键抓取，必须让它
+///    重新扫描 custom-keybindings 列表。
+/// 因此本函数：注册前自动解除内置占用（`gsettings reset` 可恢复），
+/// 再以「摘除 → 写回」列表的方式强制 gsd 重新抓取。
 pub fn register_hotkey(hotkey: &str, command: &str) -> io::Result<()> {
     let existing = read_keybinding_list()?;
-    let merged = merge_keybinding_list(&existing, KEYBINDING_PATH)
+    let list_with = merge_keybinding_list(&existing, KEYBINDING_PATH)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let list_without = strip_keybinding_list(&existing, KEYBINDING_PATH)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     clear_wm_conflict(hotkey)?;
-    run_gsettings(&["set", SCHEMA, LIST_KEY, &merged])?;
+    run_gsettings(&["set", SCHEMA, LIST_KEY, &list_without])?;
     let base = format!("{SCHEMA_KEY}:{KEYBINDING_PATH}");
     run_gsettings(&["set", &base, "name", PANEL_NAME])?;
     run_gsettings(&["set", &base, "command", command])?;
-    run_gsettings(&["set", &base, "binding", hotkey])
+    run_gsettings(&["set", &base, "binding", hotkey])?;
+    run_gsettings(&["set", SCHEMA, LIST_KEY, &list_with])
 }
 
 /// GNOME 内置键与请求的热键相同时，清空之（Windows 惯例的 Alt+Space 正撞此键）。
