@@ -59,7 +59,13 @@ else:
     install()
     dest = home / 'data/yihu/lib'
     assert (dest / 'yihu').read_bytes() == (package / 'yihu').read_bytes()
+    assert (dest / 'yihu-panel').read_bytes() == (package / 'yihu-panel').read_bytes()
     assert not (home / 'data/nautilus-python/extensions/copy_absolute_path.py').exists()
+    # Upgrade from a pre-panel install: the old 3-entry directory is accepted
+    # and yihu-panel is added; idempotence after that.
+    (dest / 'yihu-panel').unlink()
+    install()
+    assert (dest / 'yihu-panel').read_bytes() == (package / 'yihu-panel').read_bytes()
     before = snapshot()
     install('--dry-run')
     assert snapshot() == before
@@ -72,6 +78,9 @@ else:
     auto = home / '.config/autostart/yihu.desktop'
     auto.parent.mkdir(parents=True)
     auto.write_text(launcher.read_text() + 'Hidden=true\nX-GNOME-Autostart-enabled=false\n')
+    pauto = home / 'config/autostart/yihu-panel.desktop'
+    pauto.parent.mkdir(parents=True)
+    pauto.write_text(f'[Desktop Entry]\nType=Application\nName=一呼面板\nIcon=tools.yihu.desktop\nExec={Path(old).with_name("yihu-panel")}\n')
     units = home / 'config/systemd/user'
     units.mkdir(parents=True)
     service = units / 'yihu-autodark.service'
@@ -95,6 +104,7 @@ else:
     install()
     assert f'ExecStart="{dest}/autodark-agent" apply' in service.read_text()
     assert f'Exec="{dest}/yihu"' in auto.read_text() and 'Hidden=true' in auto.read_text()
+    assert f'Exec="{dest}/yihu-panel"' in pauto.read_text()
     assert config.read_text() == 'preserve this feature configuration'
     assert third.read_text() == '{"untouched": true}'
     assert '--user stop yihu-autodark.timer' in log.read_text()

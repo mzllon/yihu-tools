@@ -5,6 +5,7 @@
 //! 供各小工具复用；不依赖任何窗口或事件框架。
 
 pub mod autodark;
+pub mod panel;
 pub mod sun;
 
 use serde::Serialize;
@@ -14,6 +15,37 @@ use std::io;
 
 fn read_to_string(path: &str) -> io::Result<String> {
     fs::read_to_string(path)
+}
+
+// ---- 进程查找 ----
+
+/// 按进程名查找本用户的第一个进程，返回 (RSS kB, PSS kB)。
+/// 数据来自 `/proc/<pid>/status` 与 `smaps_rollup`。
+pub fn find_process_stats(name: &str) -> Option<(u64, u64)> {
+    for entry in fs::read_dir("/proc").ok()? {
+        let entry = entry.ok()?;
+        let fname = entry.file_name();
+        let fname = fname.to_string_lossy().into_owned();
+        if !fname.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let comm = fs::read_to_string(format!("/proc/{fname}/comm")).ok()?;
+        if comm.trim() != name {
+            continue;
+        }
+        let roll = fs::read_to_string(format!("/proc/{fname}/smaps_rollup")).ok()?;
+        let (mut rss, mut pss) = (0u64, 0u64);
+        for line in roll.lines() {
+            if let Some(v) = line.strip_prefix("Rss:") {
+                rss = v.trim().trim_end_matches(" kB").parse().unwrap_or(0);
+            }
+            if let Some(v) = line.strip_prefix("Pss:") {
+                pss = v.trim().trim_end_matches(" kB").parse().unwrap_or(0);
+            }
+        }
+        return Some((rss, pss));
+    }
+    None
 }
 
 // ---- 内存 ----

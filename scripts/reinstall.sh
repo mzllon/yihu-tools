@@ -41,7 +41,7 @@ def main():
     for cmd in ('ldd', 'pgrep', 'systemctl'):
         if not shutil.which(cmd):
             fail(f'Missing prerequisite: {cmd}')
-    required = ['yihu', 'autodark-agent', 'ARCH', 'VERSION', 'BUILD_EXE', 'reinstall.sh'] + [f'icons/{s}.png' for s in ('32x32', '128x128', '256x256', '512x512')]
+    required = ['yihu', 'autodark-agent', 'yihu-panel', 'ARCH', 'VERSION', 'BUILD_EXE', 'reinstall.sh'] + [f'icons/{s}.png' for s in ('32x32', '128x128', '256x256', '512x512')]
     manifest = {}
     for line in (payload / 'SHA256SUMS').read_text().splitlines():
         digest, name = line.split('  ', 1)
@@ -54,7 +54,7 @@ def main():
             fail(f'Invalid/missing payload: {name}')
     if (payload / 'ARCH').read_text().strip() != os.uname().machine:
         fail('Package architecture does not match this machine')
-    for name in ('yihu', 'autodark-agent'):
+    for name in ('yihu', 'autodark-agent', 'yihu-panel'):
         f = payload / name
         if not os.access(f, os.X_OK) or f.read_bytes()[:4] != b'\x7fELF':
             fail(f'Not an executable ELF: {name}')
@@ -77,9 +77,11 @@ def main():
     dest = home / '.local/lib/yihu' if data == home / '.local/share' else data / 'yihu/lib'
     safe(dest)
     if dest.exists():
-        if not dest.is_dir() or {p.name for p in dest.iterdir()} != {'yihu', 'autodark-agent', '.yihu-owned'}:
+        # Subset check (not exact): upgrading from a pre-panel install legitimately
+        # lacks yihu-panel; unknown extra files still abort.
+        if not dest.is_dir() or not {p.name for p in dest.iterdir()} <= {'yihu', 'autodark-agent', 'yihu-panel', '.yihu-owned'}:
             fail(f'Unexpected installation contents: {dest}')
-        if (dest / '.yihu-owned').read_text() != 'yihu-package-v1\n':
+        if '.yihu-owned' not in {p.name for p in dest.iterdir()} or (dest / '.yihu-owned').read_text() != 'yihu-package-v1\n':
             fail('Missing installation ownership marker')
         for f in dest.iterdir():
             owned_file(f)
@@ -87,6 +89,9 @@ def main():
     build_exe = (payload / 'BUILD_EXE').read_text().strip()
     if build_exe.endswith('/target/release/yihu') and P(build_exe).is_absolute():
         old_exes.add(build_exe)
+    # Historical panel executables found in the panel autostart entry are also
+    # terminated (after verification) and rewritten to the packaged binary.
+    panel_allowed_exes = {str(dest / 'yihu-panel')}
     updates = {}
     def desktop(path, autostart=False):
         owned_file(path)
@@ -111,6 +116,25 @@ def main():
     # Migrate both old hardcoded and XDG autostarts, preserving all flags.
     for base in {config, home / '.config'}:
         desktop(base / 'autostart/yihu.desktop', True)
+    # Panel autostart: presence is the enabled choice; migrate Exec when found.
+    def panel_desktop(path):
+        owned_file(path)
+        if not path.exists():
+            return
+        text = path.read_text()
+        if 'Name=一呼面板\n' not in text or 'Icon=tools.yihu.desktop\n' not in text:
+            fail(f'Unrecognized desktop file: {path}')
+        lines = re.findall(r'^Exec=(.*)$', text, re.M)
+        if len(lines) != 1:
+            fail(f'Unexpected Exec in {path}')
+        old = lines[0].strip('"')
+        known = panel_allowed_exes | {str(P(e).with_name('yihu-panel')) for e in old_exes}
+        if old not in known and not (old.startswith('/') and old.endswith('/target/release/yihu-panel')):
+            fail(f'Unrecognized executable: {old}')
+        panel_allowed_exes.add(old)
+        updates[path] = re.sub(r'^Exec=.*$', f'Exec="{dest}/yihu-panel"', text, flags=re.M).encode()
+    for base in {config, home / '.config'}:
+        panel_desktop(base / 'autostart/yihu-panel.desktop')
     for size in ('32x32', '128x128', '256x256', '512x512'):
         path = data / f'icons/hicolor/{size}/apps/tools.yihu.desktop.png'
         owned_file(path)
@@ -166,11 +190,11 @@ def main():
     if 'yihu-autodark.timer' in units and 'yihu-autodark.service' not in units:
         fail('Timer exists without its owned service')
     def processes():
-        result = run('pgrep', '-u', str(os.getuid()), '-x', 'yihu|autodark-agent', check=False)
+        result = run('pgrep', '-u', str(os.getuid()), '-x', 'yihu|autodark-agent|yihu-panel', check=False)
         if result.returncode not in (0, 1):
             fail('Process lookup failed')
         verified = []
-        allowed = old_exes | {str(P(e).with_name('autodark-agent')) for e in old_exes}
+        allowed = old_exes | {str(P(e).with_name('autodark-agent')) for e in old_exes} | panel_allowed_exes
         for pid in result.stdout.split():
             proc = P('/proc') / str(int(pid))
             try:
@@ -254,6 +278,7 @@ def main():
             time.sleep(0.2)
         write(dest / 'yihu', (payload / 'yihu').read_bytes(), 0o755)
         write(dest / 'autodark-agent', (payload / 'autodark-agent').read_bytes(), 0o755)
+        write(dest / 'yihu-panel', (payload / 'yihu-panel').read_bytes(), 0o755)
         write(dest / '.yihu-owned', b'yihu-package-v1\n')
         for path, content in updates.items():
             write(path, content)

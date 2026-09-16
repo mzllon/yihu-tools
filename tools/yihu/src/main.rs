@@ -11,6 +11,7 @@ mod nautilus;
 mod page_apps;
 mod page_autodark;
 mod page_clipboard;
+mod page_panel;
 mod page_radio;
 mod page_settings;
 mod radio_api;
@@ -49,6 +50,7 @@ fn build_ui(app: &Application) {
     stack.add_named(&page_clipboard::build_page(), Some("clipboard"));
     stack.add_named(&page_apps::build_page(), Some("apps"));
     stack.add_named(&page_radio::build_page(), Some("radio"));
+    stack.add_named(&page_panel::build_page(), Some("panel"));
     stack.add_named(&page_settings::build_page(), Some("settings"));
     stack.add_named(&about_page(), Some("about"));
 
@@ -67,6 +69,7 @@ fn build_ui(app: &Application) {
         ("clipboard", "edit-copy-symbolic", "右键菜单"),
         ("apps", "applications-system-symbolic", "应用跟随"),
         ("radio", "applications-multimedia-symbolic", "广播"),
+        ("panel", "system-search-symbolic", "呼出面板"),
         ("settings", "emblem-system-symbolic", "设置"),
         ("about", "help-about-symbolic", "关于"),
     ];
@@ -102,7 +105,7 @@ fn build_ui(app: &Application) {
     // 页面切换（侧边栏行序 = stack 页序）
     {
         let stack = stack.clone();
-        let names: &[&str] = &["autodark", "clipboard", "apps", "radio", "settings", "about"];
+        let names: &[&str] = &["autodark", "clipboard", "apps", "radio", "panel", "settings", "about"];
         list.connect_row_selected(move |_, row| {
             if let Some(row) = row {
                 if let Some(name) = names.get(row.index().max(0) as usize) {

@@ -1,0 +1,263 @@
+//! 呼出面板：配置持久化与 GNOME 自定义快捷键注册。
+//!
+//! Wayland 下第三方应用拿不到全局热键（协议层无 grab），走 GNOME
+//! 「自定义快捷键」路径：把 `<安装目录>/yihu-panel toggle` **合并**写入
+//! gsettings 的 custom-keybindings（绝不覆盖用户已有键）。
+//! 列表解析失败时报错返回、不写入，避免破坏用户手工配置。
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+pub const DEFAULT_HOTKEY: &str = "<Alt>space";
+/// 本项目快捷键在 relocatable schema 下的固定路径
+pub const KEYBINDING_PATH: &str =
+    "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/customYihuPanel/";
+pub const PANEL_NAME: &str = "一呼面板";
+
+const SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
+const SCHEMA_KEY: &str = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding";
+const LIST_KEY: &str = "custom-keybindings";
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub hotkey: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            hotkey: DEFAULT_HOTKEY.into(),
+        }
+    }
+}
+
+impl Config {
+    pub fn config_path() -> PathBuf {
+        let home = std::env::var("XDG_CONFIG_HOME").ok().filter(|v| !v.is_empty());
+        let base = match home {
+            Some(h) => PathBuf::from(h),
+            None => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+                .join(".config"),
+        };
+        base.join("minitools/panel.conf")
+    }
+
+    pub fn load() -> Config {
+        Self::read_from(&Self::config_path()).unwrap_or_default()
+    }
+
+    pub fn read_from(path: &Path) -> io::Result<Config> {
+        let text = fs::read_to_string(path)?;
+        let mut c = Config::default();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            match (k.trim(), v.trim()) {
+                ("hotkey", v) if !v.is_empty() => c.hotkey = v.to_string(),
+                _ => {}
+            }
+        }
+        Ok(c)
+    }
+
+    pub fn to_text(&self) -> String {
+        format!("# 一呼面板配置\nhotkey = {}\n", self.hotkey)
+    }
+
+    pub fn save(&self) -> io::Result<()> {
+        let p = Self::config_path();
+        if let Some(dir) = p.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(p, self.to_text())
+    }
+}
+
+/// 解析 `gsettings get … custom-keybindings` 的输出（GVariant 字符串数组文本，
+/// 如 `['/a/', '/b/']`；空列表为 `[]` 或 `@as []`）。
+/// 只接受带单引号的元素（路径场景足够），其他一律视为损坏返回 Err。
+pub fn parse_keybinding_list(text: &str) -> Result<Vec<String>, String> {
+    let t = text.trim();
+    let inner = t.strip_prefix("@as").unwrap_or(t).trim();
+    let Some(items_str) = inner.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+        return Err(format!("无法解析快捷键列表：{text:?}"));
+    };
+    let body = items_str.trim();
+    let mut items = Vec::new();
+    if !body.is_empty() {
+        for part in body.split(',') {
+            let p = part.trim();
+            let Some(s) = p.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else {
+                return Err(format!("快捷键列表元素格式异常：{p:?}（位于 {text:?}）"));
+            };
+            if s.is_empty() {
+                return Err(format!("快捷键列表存在空元素：{text:?}"));
+            }
+            items.push(s.to_string());
+        }
+    }
+    Ok(items)
+}
+
+/// 序列化为 gsettings set 可接受的 GVariant 文本。
+pub fn format_keybinding_list(items: &[String]) -> String {
+    format!(
+        "[{}]",
+        items.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// 把 `ours` 合并进现有列表（已存在则保持原位），返回新列表文本。
+pub fn merge_keybinding_list(existing: &str, ours: &str) -> Result<String, String> {
+    let mut items = parse_keybinding_list(existing)?;
+    if !items.iter().any(|s| s == ours) {
+        items.push(ours.to_string());
+    }
+    Ok(format_keybinding_list(&items))
+}
+
+/// 从现有列表移除 `ours`（不存在则保持原样），返回新列表文本。
+pub fn strip_keybinding_list(existing: &str, ours: &str) -> Result<String, String> {
+    let items: Vec<String> = parse_keybinding_list(existing)?
+        .into_iter()
+        .filter(|s| s != ours)
+        .collect();
+    Ok(format_keybinding_list(&items))
+}
+
+// ---- gsettings CLI 封装（与 autodark::run_gsettings 同惯例）----
+
+fn run_gsettings(args: &[&str]) -> io::Result<()> {
+    let st = Command::new("gsettings").args(args).status()?;
+    if st.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("gsettings {args:?} 失败：{st}")))
+    }
+}
+
+fn read_gsettings(args: &[&str]) -> io::Result<String> {
+    let out = Command::new("gsettings").args(args).output()?;
+    if !out.status.success() {
+        return Err(io::Error::other(format!(
+            "gsettings {args:?} 失败：{}",
+            out.status
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// 读取当前 custom-keybindings 列表原文。
+pub fn read_keybinding_list() -> io::Result<String> {
+    read_gsettings(&["get", SCHEMA, LIST_KEY])
+}
+
+/// 合并注册快捷键：列表追加我们的路径，并写入 name/command/binding。
+/// `command` 应为绝对路径 + 子命令（如 `<安装目录>/yihu-panel toggle`）。
+pub fn register_hotkey(hotkey: &str, command: &str) -> io::Result<()> {
+    let existing = read_keybinding_list()?;
+    let merged = merge_keybinding_list(&existing, KEYBINDING_PATH)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    run_gsettings(&["set", SCHEMA, LIST_KEY, &merged])?;
+    let base = format!("{SCHEMA_KEY}:{KEYBINDING_PATH}");
+    run_gsettings(&["set", &base, "name", PANEL_NAME])?;
+    run_gsettings(&["set", &base, "command", command])?;
+    run_gsettings(&["set", &base, "binding", hotkey])
+}
+
+/// 移除注册：从列表摘除我们的路径并 reset 三个键（对未注册场景幂等）。
+pub fn remove_hotkey() -> io::Result<()> {
+    let existing = read_keybinding_list()?;
+    let merged = strip_keybinding_list(&existing, KEYBINDING_PATH)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    run_gsettings(&["set", SCHEMA, LIST_KEY, &merged])?;
+    let base = format!("{SCHEMA_KEY}:{KEYBINDING_PATH}");
+    run_gsettings(&["reset", &base, "name"])?;
+    run_gsettings(&["reset", &base, "command"])?;
+    run_gsettings(&["reset", &base, "binding"])
+}
+
+/// 读取我们路径下已注册的快捷键（未注册或读取失败返回 None）。
+pub fn registered_hotkey() -> Option<String> {
+    let base = format!("{SCHEMA_KEY}:{KEYBINDING_PATH}");
+    let v = read_gsettings(&["get", &base, "binding"]).ok()?;
+    let s = v.trim().trim_matches('\'');
+    (!s.is_empty() && s != "@ss ''").then(|| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OURS: &str = KEYBINDING_PATH;
+
+    #[test]
+    fn merge_into_empty_variants() {
+        assert_eq!(
+            merge_keybinding_list("[]", OURS).unwrap(),
+            format!("['{OURS}']")
+        );
+        // gsettings 对空 relocatable 数组可能返回类型标注形式
+        assert_eq!(
+            merge_keybinding_list("@as []", OURS).unwrap(),
+            format!("['{OURS}']")
+        );
+    }
+
+    #[test]
+    fn merge_appends_and_dedups() {
+        let existing = "['/org/a/custom0/', '/org/b/custom1/']";
+        let merged = merge_keybinding_list(existing, OURS).unwrap();
+        assert_eq!(
+            merged,
+            format!("['/org/a/custom0/', '/org/b/custom1/', '{OURS}']")
+        );
+        // 重复合并不产生重复项
+        assert_eq!(merge_keybinding_list(&merged, OURS).unwrap(), merged);
+    }
+
+    #[test]
+    fn merge_rejects_garbage() {
+        assert!(merge_keybinding_list("not-a-list", OURS).is_err());
+        assert!(merge_keybinding_list("['/a/', bare]", OURS).is_err());
+        assert!(merge_keybinding_list("['/a/', '/a/", OURS).is_err());
+    }
+
+    #[test]
+    fn strip_removes_only_ours() {
+        let existing = format!("['/org/a/custom0/', '{OURS}']");
+        assert_eq!(strip_keybinding_list(&existing, OURS).unwrap(), "['/org/a/custom0/']");
+        // 不存在时原样保留（空元素也要能表达）
+        assert_eq!(
+            strip_keybinding_list("['/org/a/custom0/']", OURS).unwrap(),
+            "['/org/a/custom0/']"
+        );
+        assert_eq!(strip_keybinding_list("[]", OURS).unwrap(), "[]");
+    }
+
+    #[test]
+    fn roundtrip_merge_then_strip() {
+        let existing = "['/org/a/custom0/', '/org/b/custom1/']";
+        let merged = merge_keybinding_list(existing, OURS).unwrap();
+        assert_eq!(strip_keybinding_list(&merged, OURS).unwrap(), existing);
+    }
+
+    #[test]
+    fn config_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("yihu-panel-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("panel.conf");
+        fs::write(&p, "hotkey = <Alt>z\n").unwrap();
+        let c = Config::read_from(&p).unwrap();
+        assert_eq!(c.hotkey, "<Alt>z");
+        // 空文件/损坏行回退默认值
+        fs::write(&p, "# 注释\nbadline\n").unwrap();
+        let c = Config::read_from(&p).unwrap();
+        assert_eq!(c.hotkey, DEFAULT_HOTKEY);
+        fs::remove_dir_all(&dir).ok();
+    }
+}

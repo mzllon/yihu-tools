@@ -1,0 +1,10 @@
+[package]
+name = "yihu-panel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+zbus = "4"
+nucleo = "0.5"
+libc = "0.2"

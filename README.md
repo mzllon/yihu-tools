@@ -5,7 +5,7 @@
 `yihu-tools` 的长期形态：对标 uTools / ZTools 的呼出式工具箱——
 全局快捷键一呼即出，搜索式命令面板直达能力，工具以插件形式逐步生长。
 当前版本已是一个可日常使用的 Linux/GNOME 工具集（能力见下表），
-呼出面板与插件系统在路线图中。
+呼出面板 M1 骨架已落地（全局热键 + 搜索面板），插件系统在路线图中。
 
 选型立场：**跨平台向低资源占用倾斜，软件性能永远优先**。
 因此以 Rust + GTK4/libadwaita 原生实现、拒绝 WebView UI，
@@ -34,6 +34,7 @@
 | 右键菜单 | Nautilus 扩展（python3-nautilus） | 文件管理器右键顶级菜单：复制绝对路径（多选/当前目录） |
 | 应用跟随 | 适配器（改写应用自身配置） | 让不跟随系统主题的应用自动切换：VS Code 系（CodeBuddy/ZCode）已支持 |
 | 广播 | `gst-launch-1.0` 子进程 | 在线电台分类收听与收藏（蜻蜓FM 公开接口 64k 流）；播放时才有子进程，停止即退 |
+| 呼出面板 | `yihu-panel`（隐藏待命守护进程 + zbus） | 全局快捷键呼出的搜索面板（M1 骨架，性能实测见下文）；中心「呼出面板」页一键注册热键 |
 | 设置 | 中心自身 | 开机启动开关；各组件（中心/agent/扩展）资源占用总览 |
 | 关于 | — | 版本与架构说明 |
 
@@ -112,6 +113,20 @@ Nautilus 右键顶级菜单（python3-nautilus 扩展，复制动作在 Nautilus
 | 二进制体积 | 0.55 MB（agent 0.43 MB） | 6.7 MB |
 | 常驻后台 | 无（定时器按需拉起 agent） | 无 |
 
+### 呼出面板 M1（2026-09 实测，release 构建）
+
+| 指标 | 数值 |
+|---|---|
+| 隐藏待命 RSS / PSS | ~71 MB / ~25 MB（PSS 为真实物理占用；共享库映射占 RSS 大头，与中心同基线） |
+| 暖 toggle 全程 | ~10 ms（薄 CLI 进程 + DBus 往返 + 主循环消费，`/usr/bin/time` 实测） |
+| 1 万条模糊过滤 | 0.4–3.4 ms（nucleo 双线程；`YIHU_PANEL_BENCH=1 yihu-panel` 可复现） |
+| 二进制体积 | 3.2 MB（含 nucleo/zbus，strip + thin LTO） |
+| 呼出路径 IO | 0（窗口/列表/主题判定启动时完成，toggle 只做 present + grab_focus） |
+
+> 口径修正：调研期设定的「待命 RSS ≤40 MB」基于「空 GTK4 窗口 ≈20 MB」的社区数字，
+> 在本机（Ubuntu 24.04、cairo 渲染）实测不成立——GTK4 进程共享库映射即 ~45 MB，
+> 中心同口径也是 ~80 MB RSS。故改以 PSS 为真实占用口径：待命 PSS 25 MB，优于中心（31 MB）。
+
 关键教训：① GL 渲染器会把 Mesa/NVIDIA 驱动栈映射进进程，
 低频刷新工具在 `main` 开头设 `GSK_RENDERER=cairo`（183 → 85 MB）；
 ② gtk4-rs 的 API 有 `v4_x` feature 门控（已统一启用 `v4_12`）。
@@ -122,8 +137,9 @@ Nautilus 右键顶级菜单（python3-nautilus 扩展，复制动作在 Nautilus
 yihu-tools/
 ├── Cargo.toml                  # workspace 根
 ├── crates/mt-core/             # 共享核心库
-│   ├── src/lib.rs              #   /proc、statvfs 系统信息读取
+│   ├── src/lib.rs              #   /proc、statvfs 系统信息读取、进程查找
 │   ├── src/autodark.rs         #   主题配置/调度/gsettings 应用
+│   ├── src/panel.rs            #   面板配置/GNOME 自定义快捷键合并注册
 │   └── src/sun.rs              #   日出日落天文算法（NOAA 简化）
 ├── tools/
 │   ├── yihu/                   # 中心应用（统一管理入口）
@@ -138,9 +154,11 @@ yihu-tools/
 │   │       ├── page_settings.rs   # 设置页（开机启动/资源占用）
 │   │       ├── adapters.rs     #   应用适配器清单与逻辑
 │   │       └── nautilus.rs     #   扩展安装/状态（内容编译期内嵌）
+│   ├── yihu-panel/             # 呼出面板（隐藏待命窗口 + toggle 薄 CLI）
 │   ├── sysdash/                # 系统仪表盘（已卸载退役，源码保留，不在构建清单）
 │   └── autodark-agent/         # 切换执行器（无 UI，systemd 调用）
 ├── packaging/                  # desktop 文件 + Nautilus 扩展源
+├── docs/                       # 调研与里程碑文档
 └── scripts/                    # gen_icon.py / install.sh
 ```
 
@@ -208,9 +226,10 @@ procps、ldd、systemd 用户登录会话及 GTK/libadwaita/DBus 运行库。
 ## 路线图（呼出式工具箱方向）
 
 - **呼出面板**：全局快捷键唤起搜索式命令面板（对标 ZTools 的核心交互），
-  各能力注册为面板命令；调研与方案见
-  [docs/呼出面板调研.md](docs/呼出面板调研.md)
-  （GNOME/Wayland 硬限制对策、性能选型、里程碑与验收指标）；
+  各能力注册为面板命令。**M1 骨架已完成**：`yihu-panel` 常驻守护进程 +
+  `toggle` 薄 CLI（zbus）+ GNOME 自定义快捷键合并注册 + 中心管理页；
+  调研与方案见 [docs/呼出面板调研.md](docs/呼出面板调研.md)，
+  计划与实测见 [docs/呼出面板M1计划.md](docs/呼出面板M1计划.md)；
 - **插件生态**：把适配器与工具抽象为统一插件描述（清单 + 入口 + 权限）；
 - **跨平台**：中心与执行端保持平台抽象，逐步支持 Windows / macOS
   （选型仍以低开销为先，必要时为平台更换执行端而非引入重运行时）；

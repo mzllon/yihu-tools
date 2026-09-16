@@ -135,7 +135,7 @@ impl Ui {
         });
 
         // 中心进程资源
-        self.center_res.set_text(&match proc_stats("yihu") {
+        self.center_res.set_text(&match mt_core::find_process_stats("yihu") {
             Some((rss, pss)) => {
                 format!("运行中 · RSS {:.0} MB · 实际 {:.0} MB", mb(rss), mb(pss))
             }
@@ -198,34 +198,6 @@ pub(crate) fn set_autostart(on: bool) -> io::Result<()> {
 }
 
 // ---- 进程资源读取 ----
-
-/// 按进程名查找本用户进程，返回 (RSS kB, PSS kB)。
-fn proc_stats(name: &str) -> Option<(u64, u64)> {
-    for entry in fs::read_dir("/proc").ok()? {
-        let entry = entry.ok()?;
-        let fname = entry.file_name();
-        let fname = fname.to_string_lossy().into_owned();
-        if !fname.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        let comm = fs::read_to_string(format!("/proc/{fname}/comm")).ok()?;
-        if comm.trim() != name {
-            continue;
-        }
-        let roll = fs::read_to_string(format!("/proc/{fname}/smaps_rollup")).ok()?;
-        let (mut rss, mut pss) = (0u64, 0u64);
-        for line in roll.lines() {
-            if let Some(v) = line.strip_prefix("Rss:") {
-                rss = v.trim().trim_end_matches(" kB").parse().unwrap_or(0);
-            }
-            if let Some(v) = line.strip_prefix("Pss:") {
-                pss = v.trim().trim_end_matches(" kB").parse().unwrap_or(0);
-            }
-        }
-        return Some((rss, pss));
-    }
-    None
-}
 
 fn mb(kb: u64) -> f64 {
     kb as f64 / 1024.0
