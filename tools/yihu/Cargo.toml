@@ -1,0 +1,13 @@
+[package]
+name = "yihu"
+version.workspace = true
+edition.workspace = true
+description = "一呼：Ubuntu 桌面工具箱统一管理中心"
+
+[dependencies]
+mt-core = { path = "../../crates/mt-core" }
+serde_json = "1"
+ksni = "0.2"
+mpris-server = "0.3"
+gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_4"] }

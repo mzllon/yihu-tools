@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/mt-core", "tools/yihu", "tools/autodark-agent"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+lto = "thin"
+strip = true

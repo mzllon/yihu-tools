@@ -1,0 +1,9 @@
+[package]
+name = "mt-core"
+version.workspace = true
+edition.workspace = true
+description = "MiniTools 共享核心库：Linux 系统信息读取"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+libc = "0.2"

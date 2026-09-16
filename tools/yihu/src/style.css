@@ -1,0 +1,63 @@
+/* MiniTools 中心：与各工具共享的视觉语言 */
+
+.sec-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: alpha(@window_fg_color, 0.6);
+}
+
+.row-title {
+  font-weight: 700;
+}
+
+.caption-sm {
+  font-size: 11px;
+}
+
+.sub-head {
+  margin-top: 8px;
+}
+
+.card-pad {
+  padding: 18px;
+}
+
+.state-ok {
+  color: #3fb27f;
+  font-weight: 700;
+}
+
+.state-off {
+  color: alpha(@window_fg_color, 0.55);
+  font-weight: 700;
+}
+
+.state-warn {
+  color: #d8a012;
+  font-weight: 700;
+}
+
+spinbutton.spin-hm {
+  min-width: 74px;
+}
+
+entry.coord {
+  min-width: 110px;
+}
+
+.load-chip {
+  background: alpha(@window_fg_color, 0.06);
+  border-radius: 8px;
+  padding: 12px 0;
+}
+
+.load-chip > label {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+progressbar > trough {
+  background: alpha(@window_fg_color, 0.10);
+  border: none;
+}

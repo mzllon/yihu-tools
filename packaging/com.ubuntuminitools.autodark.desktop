@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=AutoDark
+GenericName=自动深浅色主题切换
+Comment=MiniTools · 按时间或日出日落自动切换 GNOME 深浅色模式
+Exec=/home/ming-tang/Documents/Self/Ubuntu-MiniTools/target/release/autodark
+Icon=com.ubuntuminitools.autodark
+Terminal=false
+Categories=Settings;DesktopSettings;
+StartupNotify=true

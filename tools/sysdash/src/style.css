@@ -1,0 +1,58 @@
+/* SysDash 自定义样式：在 libadwaita 深色主题之上叠加仪表盘视觉 */
+
+.sec-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: alpha(@window_fg_color, 0.6);
+}
+
+.bignum {
+  font-size: 32px;
+  font-weight: 800;
+}
+
+.caption-sm {
+  font-size: 11px;
+}
+
+.sub-head {
+  margin-top: 8px;
+}
+
+.card-pad {
+  padding: 18px;
+}
+
+/* ---- 进度条 ---- */
+progressbar > trough {
+  background: alpha(@window_fg_color, 0.10);
+  border: none;
+}
+
+progressbar.big > trough { min-height: 12px; border-radius: 6px; }
+progressbar.big > progress { min-height: 12px; border-radius: 6px; }
+
+progressbar.slim > trough { min-height: 8px; border-radius: 4px; }
+progressbar.slim > progress { min-height: 8px; border-radius: 4px; }
+
+progressbar.core { min-width: 40px; }
+progressbar.core > trough { min-height: 6px; border-radius: 3px; }
+progressbar.core > progress { min-height: 6px; border-radius: 3px; }
+
+progressbar.mem > progress { background: linear-gradient(to right, #2f6fed, #59a7ff); }
+progressbar.swap > progress { background: linear-gradient(to right, #8a6bd1, #b58cf0); }
+progressbar.disk > progress { background: linear-gradient(to right, #772953, #e95420); }
+progressbar.core > progress { background: linear-gradient(to right, #772953, #e95420); }
+
+/* ---- 负载数值块 ---- */
+.load-chip {
+  background: alpha(@window_fg_color, 0.06);
+  border-radius: 8px;
+  padding: 12px 0;
+}
+
+.load-chip > label {
+  font-weight: 700;
+  font-size: 15px;
+}
