@@ -128,6 +128,8 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
     factory.connect_bind(bind_row);
     let list = ListView::new(Some(sel.clone()), Some(factory));
     list.add_css_class("panel-list");
+    // 启动器惯例：单击即激活（默认是双击）
+    list.set_single_click_activate(true);
     let scroll = ScrolledWindow::new();
     scroll.set_child(Some(&list));
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -229,40 +231,29 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
         });
     }
 
-    // —— 激活：按 kind 分发真实动作 ——
+    // —— 激活：按 kind 分发真实动作（回车 / 单击 / 双击）——
     {
         let win = win.clone();
+        let visible = visible.clone();
         let history = history.clone();
         let center = center.clone();
         let store = store.clone();
-        let visible = visible.clone();
         list.connect_activate(move |_, pos| {
-            let Some(obj) = store.item(pos) else {
-                return;
-            };
-            let Some(item) = obj.downcast_ref::<PanelItem>() else {
-                return;
-            };
-            let kind = item.kind();
-            let payload = item.payload().to_string();
-            match kind.as_str() {
-                "app" => {
-                    if launch_app(&payload) {
-                        record(&history, &format!("app:{payload}"));
-                        hide_panel(&win, &visible);
-                    }
-                }
-                "cap" => {
-                    run_cap(&payload, &center);
-                    record(&history, &format!("cap:{payload}"));
-                    hide_panel(&win, &visible);
-                }
-                "calc" => {
-                    win.clipboard().set_text(&payload);
-                    item.set_subtitle("已复制".to_string());
-                    record(&history, "calc");
-                }
-                _ => {}
+            dispatch_item(&win, &visible, &history, &center, &store, pos);
+        });
+    }
+    {
+        // 回车时焦点在搜索框，列表收不到按键——在搜索框上激活当前选中项
+        let win = win.clone();
+        let visible = visible.clone();
+        let history = history.clone();
+        let center = center.clone();
+        let store = store.clone();
+        let sel = sel.clone();
+        entry.connect_activate(move |_| {
+            let pos = sel.selected();
+            if sel.model().map(|m| m.n_items()).unwrap_or(0) > pos {
+                dispatch_item(&win, &visible, &history, &center, &store, pos);
             }
         });
     }
@@ -344,6 +335,44 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
     }
 
     // 启动即隐藏待命：不 present
+}
+
+/// 按 kind 分发条目动作：app 启动 / cap 执行 / calc 复制。
+fn dispatch_item(
+    win: &Window,
+    visible: &AtomicBool,
+    history: &Rc<RefCell<mt_core::panel::History>>,
+    center: &PathBuf,
+    store: &gio::ListStore,
+    pos: u32,
+) {
+    let Some(obj) = store.item(pos) else {
+        return;
+    };
+    let Some(item) = obj.downcast_ref::<PanelItem>() else {
+        return;
+    };
+    let kind = item.kind();
+    let payload = item.payload().to_string();
+    match kind.as_str() {
+        "app" => {
+            if launch_app(&payload) {
+                record(history, &format!("app:{payload}"));
+                hide_panel(win, visible);
+            }
+        }
+        "cap" => {
+            run_cap(&payload, center);
+            record(history, &format!("cap:{payload}"));
+            hide_panel(win, visible);
+        }
+        "calc" => {
+            win.clipboard().set_text(&payload);
+            item.set_subtitle("已复制".to_string());
+            record(history, "calc");
+        }
+        _ => {}
+    }
 }
 
 fn toggle_panel(win: &Window, entry: &SearchEntry, visible: &AtomicBool) {
