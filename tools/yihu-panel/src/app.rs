@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    gio, gdk, Align, Box as GtkBox, ListView, Orientation, ScrolledWindow, SearchEntry, Window,
+    gio, gdk, Align, Box as GtkBox, Label, ListView, Orientation, ScrolledWindow, SearchEntry,
+    Window,
 };
 
 use crate::calc;
@@ -105,7 +106,7 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
     win.set_application(Some(app));
     win.set_title(Some("一呼"));
     win.set_icon_name(Some("tools.yihu.desktop"));
-    win.set_default_size(720, 480);
+    win.set_default_size(720, 520);
     win.set_resizable(false);
     win.set_hide_on_close(true);
     win.add_css_class("panel-root");
@@ -120,12 +121,27 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
     entry.set_search_delay(0);
     card.append(&entry);
 
+    // —— 数据：能力 + 已安装应用（启动时枚举，呼出路径零 IO）——
+    let history = Rc::new(RefCell::new(mt_core::panel::History::load()));
+    let center = sibling("yihu");
+    let entries = Rc::new(RefCell::new(build_entries(
+        &history.borrow(),
+        collect_apps(),
+    )));
+    let nuc = Rc::new(RefCell::new(build_nucleo(&entries.borrow())));
+
     let store = gio::ListStore::new::<PanelItem>();
     let sel = gtk::SingleSelection::new(Some(store.clone()));
     sel.set_autoselect(true);
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(setup_row);
-    factory.connect_bind(bind_row);
+    {
+        let win = win.clone();
+        let visible = visible.clone();
+        let history = history.clone();
+        let center = center.clone();
+        factory.connect_setup(setup_row);
+        factory.connect_bind(move |f, obj| bind_row(f, obj, &win, &visible, &history, &center));
+    }
     let list = ListView::new(Some(sel.clone()), Some(factory));
     list.add_css_class("panel-list");
     // 启动器惯例：单击即激活（默认是双击）
@@ -139,15 +155,6 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
 
     // —— 主题跟随：gio::Settings 监听，show 路径零 IO ——
     watch_theme(&win);
-
-    // —— 数据：能力 + 已安装应用（启动时枚举，呼出路径零 IO）——
-    let history = Rc::new(RefCell::new(mt_core::panel::History::load()));
-    let center = sibling("yihu");
-    let entries = Rc::new(RefCell::new(build_entries(
-        &history.borrow(),
-        collect_apps(),
-    )));
-    let nuc = Rc::new(RefCell::new(build_nucleo(&entries.borrow())));
 
     let query = Rc::new(RefCell::new(String::new()));
     let calc_row: Rc<RefCell<Option<PanelEntry>>> = Rc::new(RefCell::new(None));
@@ -174,14 +181,16 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
         });
     }
 
-    // —— 刷新：nucleo 结果 / 空输入默认集，计算行置顶 ——
+    // —— 刷新：nucleo 结果 / 分组默认集，计算行置顶 ——
     {
         let nuc = nuc.clone();
         let entries = entries.clone();
+        let history = history.clone();
         let query = query.clone();
         let calc_row = calc_row.clone();
         let dirty = dirty.clone();
         let store = store.clone();
+        let sel = sel.clone();
         glib::timeout_add_local(Duration::from_millis(30), move || {
             let changed = nuc.borrow_mut().tick(4).changed;
             if !(changed || dirty.get()) {
@@ -195,7 +204,8 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
             }
             let q = query.borrow().clone();
             if q.is_empty() {
-                for e in entries.borrow().iter() {
+                // 分组默认集：最近 / 快捷能力(胶囊) / 常用应用
+                for e in default_rows(&history.borrow(), &entries.borrow()) {
                     if rows.len() >= MAX_SHOWN {
                         break;
                     }
@@ -223,6 +233,12 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
             store.remove_all();
             for e in rows {
                 store.append(&PanelItem::from_entry(&e));
+            }
+            // 选中项若落在标题/胶囊等不可激活行上，挪到第一个可激活行
+            if !selectable_at(&store, sel.selected()) {
+                if let Some(p) = first_selectable(&store) {
+                    sel.set_selected(p);
+                }
             }
             if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
                 eprintln!("yihu-panel: 过滤+刷新 {:?}", start.elapsed());
@@ -281,17 +297,35 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
     {
         let sel = sel.clone();
         let list = list.clone();
+        let store = store.clone();
         let ec_entry = gtk::EventControllerKey::new();
         ec_entry.connect_key_pressed(move |_, key, _, _| {
             let n = sel.model().map(|m| m.n_items()).unwrap_or(0);
             if n == 0 {
                 return glib::Propagation::Proceed;
             }
-            let next = match key {
-                gdk::Key::Down => (sel.selected() as i64 + 1).min(n as i64 - 1),
-                gdk::Key::Up => (sel.selected() as i64 - 1).max(0),
+            let dir: i64 = match key {
+                gdk::Key::Down => 1,
+                gdk::Key::Up => -1,
                 _ => return glib::Propagation::Proceed,
             };
+            // 从当前选中项出发，跳过标题/胶囊等不可激活行
+            let mut cur = sel.selected() as i64;
+            if cur < 0 || cur >= n as i64 {
+                cur = if dir > 0 { -1 } else { n as i64 };
+            }
+            let mut next = cur.clamp(0, n as i64 - 1);
+            let mut cand = cur;
+            for _ in 0..n {
+                cand += dir;
+                if cand < 0 || cand >= n as i64 {
+                    break;
+                }
+                if selectable_at(&store, cand as u32) {
+                    next = cand;
+                    break;
+                }
+            }
             sel.set_selected(next as u32);
             list.scroll_to(next as u32, gtk::ListScrollFlags::empty(), None);
             glib::Propagation::Stop
@@ -526,6 +560,125 @@ fn build_nucleo(entries: &[PanelEntry]) -> nucleo::Nucleo<PanelEntry> {
     nuc
 }
 
+// ---- 分组默认集：最近 / 快捷能力(胶囊) / 常用应用 ----
+
+fn header_row(t: &str) -> PanelEntry {
+    PanelEntry {
+        title: t.to_string(),
+        subtitle: String::new(),
+        icon_spec: String::new(),
+        kind: "header",
+        payload: String::new(),
+    }
+}
+
+/// 空输入时的分组默认集，严格限量：最近 3 条（应用+能力按时间）→
+/// 快捷能力胶囊行 → 常用应用 3 条（按次数，跳过最近已展示的）。
+/// 历史为空时省去「最近」小节，不做空分区。
+fn default_rows(history: &mt_core::panel::History, entries: &[PanelEntry]) -> Vec<PanelEntry> {
+    let find = |id: &str| {
+        entries
+            .iter()
+            .find(|e| format!("{}:{}", e.kind, e.payload) == id)
+            .cloned()
+    };
+    let mut rows = Vec::new();
+
+    let mut recent: Vec<PanelEntry> = {
+        let mut hs = history.entries.clone();
+        hs.sort_by(|a, b| b.last.cmp(&a.last).then(b.count.cmp(&a.count)));
+        hs.iter().filter_map(|h| find(&h.id)).take(3).collect()
+    };
+    if !recent.is_empty() {
+        rows.push(header_row("最近"));
+        rows.append(&mut recent);
+    }
+
+    rows.push(header_row("快捷能力"));
+    rows.push(PanelEntry {
+        title: String::new(),
+        subtitle: String::new(),
+        icon_spec: String::new(),
+        kind: "chips",
+        payload: String::new(),
+    });
+
+    let recent_ids: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|e| e.kind == "app")
+        .map(|e| format!("app:{}", e.payload))
+        .collect();
+    let mut apps: Vec<&PanelEntry> = entries.iter().filter(|e| e.kind == "app").collect();
+    apps.sort_by(|a, b| {
+        let (ca, cb) = (history.count_of(&a.payload), history.count_of(&b.payload));
+        let (la, lb) = (history.last_of(&a.payload), history.last_of(&b.payload));
+        cb.cmp(&ca).then(lb.cmp(&la)).then(a.title.cmp(&b.title))
+    });
+    let top: Vec<PanelEntry> = apps
+        .into_iter()
+        .filter(|e| !recent_ids.contains(&format!("app:{}", e.payload)))
+        .take(3)
+        .cloned()
+        .collect();
+    if !top.is_empty() {
+        rows.push(header_row("常用应用"));
+        rows.extend(top);
+    }
+    rows
+}
+
+/// 快捷能力胶囊：一行小按钮，点击直接触发（无需选中回车）。
+fn chip_buttons(
+    win: &Window,
+    visible: &Arc<AtomicBool>,
+    history: &Rc<RefCell<mt_core::panel::History>>,
+    center: &PathBuf,
+) -> Vec<gtk::Button> {
+    const CHIPS: &[(&str, &str, &str)] = &[
+        ("theme:dark", "深色", "weather-clear-night-symbolic"),
+        ("theme:light", "浅色", "weather-clear-symbolic"),
+        ("center", "中心", "tools.yihu.desktop"),
+        ("page:radio", "广播", "applications-multimedia-symbolic"),
+        ("page:autodark", "主题页", "night-light-symbolic"),
+    ];
+    CHIPS
+        .iter()
+        .map(|(payload, label, icon)| {
+            let b = gtk::Button::new();
+            b.add_css_class("panel-chip");
+            let bx = GtkBox::new(Orientation::Horizontal, 6);
+            let img = gtk::Image::from_icon_name(icon);
+            img.set_pixel_size(16);
+            bx.append(&img);
+            bx.append(&Label::new(Some(label)));
+            b.set_child(Some(&bx));
+            let win = win.clone();
+            let visible = visible.clone();
+            let history = history.clone();
+            let center = center.clone();
+            let payload = payload.to_string();
+            b.connect_clicked(move |_| {
+                run_cap(&payload, &center);
+                record(&history, &format!("cap:{payload}"));
+                hide_panel(&win, &visible);
+            });
+            b
+        })
+        .collect()
+}
+
+fn selectable_at(store: &gio::ListStore, pos: u32) -> bool {
+    store
+        .item(pos)
+        .and_downcast::<PanelItem>()
+        .map(|i| matches!(i.kind().as_str(), "app" | "cap" | "calc"))
+        .unwrap_or(false)
+}
+
+fn first_selectable(store: &gio::ListStore) -> Option<u32> {
+    (0..store.n_items()).find(|p| selectable_at(store, *p))
+}
+
 /// 输入若是完整算式（含至少一个运算符），生成置顶的计算结果条目。
 fn calc_entry(text: &str) -> Option<PanelEntry> {
     if text.len() < 3 || !text.chars().any(|c| "+-*/%^".contains(c)) {
@@ -642,8 +795,12 @@ fn setup_row(_: &gtk::SignalListItemFactory, obj: &glib::Object) {
     sub.set_ellipsize(gtk::pango::EllipsizeMode::End);
     col.append(&title);
     col.append(&sub);
+    let chips = GtkBox::new(Orientation::Horizontal, 8);
+    chips.set_valign(Align::Center);
+    chips.set_visible(false);
     row.append(&icon);
     row.append(&col);
+    row.append(&chips);
     li.set_child(Some(&row));
     // 安全性：键 "yihu-row" 只在本文件 setup/bind 中使用，类型恒为 Row
     unsafe {
@@ -651,14 +808,23 @@ fn setup_row(_: &gtk::SignalListItemFactory, obj: &glib::Object) {
             "yihu-row",
             Row {
                 icon,
+                col,
                 title,
                 sub,
+                chips,
             },
         )
     };
 }
 
-fn bind_row(_: &gtk::SignalListItemFactory, obj: &glib::Object) {
+fn bind_row(
+    _: &gtk::SignalListItemFactory,
+    obj: &glib::Object,
+    win: &Window,
+    visible: &Arc<AtomicBool>,
+    history: &Rc<RefCell<mt_core::panel::History>>,
+    center: &PathBuf,
+) {
     let li = obj.downcast_ref::<gtk::ListItem>().expect("ListItem");
     let item = li.item().and_downcast::<PanelItem>().expect("PanelItem");
     // 安全性：同 set_data，键与类型由本文件保证
@@ -666,15 +832,48 @@ fn bind_row(_: &gtk::SignalListItemFactory, obj: &glib::Object) {
         let ptr = li.data::<Row>("yihu-row").expect("row data");
         ptr.as_ref()
     };
-    row.title.set_text(&item.title());
-    row.sub.set_text(&item.subtitle());
-    row.icon.set_from_gicon(&gicon_for_spec(&item.icon_spec()));
+    match item.kind().as_str() {
+        // 小节标题：灰字小号，不可激活
+        "header" => {
+            row.icon.set_visible(false);
+            row.chips.set_visible(false);
+            row.col.set_visible(true);
+            row.sub.set_visible(false);
+            row.title.set_text(&item.title());
+            row.title.add_css_class("section-header");
+        }
+        // 快捷能力胶囊行：一行小按钮，直接触发对应能力
+        "chips" => {
+            row.icon.set_visible(false);
+            row.col.set_visible(false);
+            row.chips.set_visible(true);
+            while let Some(c) = row.chips.first_child() {
+                row.chips.remove(&c);
+            }
+            for b in chip_buttons(win, visible, history, center) {
+                row.chips.append(&b);
+            }
+        }
+        // 普通条目：图标 + 标题 + 副标题
+        _ => {
+            row.icon.set_visible(true);
+            row.col.set_visible(true);
+            row.chips.set_visible(false);
+            row.title.remove_css_class("section-header");
+            row.title.set_text(&item.title());
+            row.sub.set_visible(true);
+            row.sub.set_text(&item.subtitle());
+            row.icon.set_from_gicon(&gicon_for_spec(&item.icon_spec()));
+        }
+    }
 }
 
 struct Row {
     icon: gtk::Image,
+    col: GtkBox,
     title: gtk::Label,
     sub: gtk::Label,
+    chips: GtkBox,
 }
 
 // ---- 列表条目 GObject ----

@@ -47,9 +47,23 @@ window.light .panel-card {
   font-weight: 600;
   font-size: 14px;
 }
+.panel-list > row .section-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: alpha(currentColor, 0.55);
+}
 .panel-list > row .caption-sm {
   font-size: 12px;
   opacity: 0.7;
+}
+
+.panel-chip {
+  border-radius: 14px;
+  padding: 3px 12px;
+  background-color: alpha(currentColor, 0.07);
+}
+.panel-chip:hover {
+  background-color: alpha(currentColor, 0.14);
 }
 
 .row-icon {
