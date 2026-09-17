@@ -6,6 +6,7 @@ use gtk::{Align, Box as GtkBox, Label, Orientation, Switch};
 use std::cell::Cell;
 use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
@@ -186,7 +187,10 @@ pub(crate) fn set_autostart(on: bool) -> io::Result<()> {
         );
         let p = autostart_path();
         fs::create_dir_all(p.parent().expect("自启动路径必有父目录"))?;
-        fs::write(p, content)?;
+        fs::write(&p, content)?;
+        // 显式 0644：umask 002 的系统上 fs::write 会得到 664（组可写），
+        // 会被发布包安装器的安全检查拒绝
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o644))?;
     } else {
         match fs::remove_file(autostart_path()) {
             Ok(_) => {}
