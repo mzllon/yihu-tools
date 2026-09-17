@@ -15,6 +15,7 @@ mod page_panel;
 mod page_radio;
 mod page_settings;
 mod radio_api;
+mod shell_ext;
 mod radio_player;
 mod tray;
 

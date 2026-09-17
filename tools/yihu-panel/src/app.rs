@@ -191,6 +191,8 @@ fn summon(deps: &Deps, slot: &Slot) {
     };
     win.present();
     entry.grab_focus();
+    // 请求 Shell 扩展把面板摆到上部居中（未装扩展时静默忽略）
+    crate::service::call_placer();
     deps.visible.store(true, Ordering::Relaxed);
     deps.dirty.set(true);
     if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {

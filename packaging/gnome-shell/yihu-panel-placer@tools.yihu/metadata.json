@@ -1,0 +1,7 @@
+{
+  "uuid": "yihu-panel-placer@tools.yihu",
+  "name": "一呼面板定位",
+  "description": "把一呼呼出面板摆放到屏幕上部居中并置顶（配合一呼 yihu-panel 使用）",
+  "url": "https://github.com/mzllon/yihu-tools",
+  "shell-version": ["44", "45", "46", "47", "48", "49"]
+}

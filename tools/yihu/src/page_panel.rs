@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use mt_core::panel;
 
+use crate::shell_ext;
 use crate::{page_shell, scroll_clamp};
 
 const AUTOSTART_NAME: &str = "yihu-panel.desktop";
@@ -40,6 +41,7 @@ struct Ui {
     hotkey_state: Label,
     hotkey_result: Label,
     preset: DropDown,
+    pos_state: Label,
 }
 
 /// 后台任务结果槽（阻塞调用不入 UI 主线程的既有惯例）
@@ -132,6 +134,32 @@ pub fn build_page() -> gtk::Widget {
     as_hint.set_halign(Align::Start);
     as_card.append(&as_hint);
 
+    // —— 卡片：屏幕位置（Shell 扩展）——
+    let pos_card = card();
+    let pos_title = Label::new(Some("屏幕位置"));
+    pos_title.add_css_class("sec-title");
+    pos_title.set_halign(Align::Start);
+    pos_card.append(&pos_title);
+    let (pl_row, pos_state) = status_row("面板定位扩展");
+    pos_card.append(&pl_row);
+    let pos_btn_row = GtkBox::new(Orientation::Horizontal, 8);
+    let pos_install_btn = Button::with_label("安装扩展");
+    let pos_remove_btn = Button::with_label("移除扩展");
+    pos_btn_row.append(&pos_install_btn);
+    pos_btn_row.append(&pos_remove_btn);
+    pos_btn_row.set_halign(Align::Start);
+    pos_card.append(&pos_btn_row);
+    let pos_hint = Label::new(Some(
+        "Wayland 下应用无法决定自己的位置：默认由系统摆放（位置不固定）。\n\
+         安装定位扩展后（GNOME Shell 扩展，约 2KB，仅本用户），面板每次呼出\n\
+         自动摆到「水平居中、垂直上 1/4 处」并置顶。新装扩展需注销重新登录一次生效。",
+    ));
+    pos_hint.add_css_class("dim-label");
+    pos_hint.add_css_class("caption-sm");
+    pos_hint.set_wrap(true);
+    pos_hint.set_halign(Align::Start);
+    pos_card.append(&pos_hint);
+
     // —— 卡片：说明 ——
     let note_card = card();
     let note_title = Label::new(Some("形态说明（M1 骨架）"));
@@ -158,7 +186,7 @@ pub fn build_page() -> gtk::Widget {
     main_box.set_margin_start(24);
     main_box.set_margin_end(24);
     main_box.set_valign(Align::Start);
-    for c in [&proc_card, &hk_card, &as_card, &note_card] {
+    for c in [&proc_card, &hk_card, &pos_card, &as_card, &note_card] {
         c.set_hexpand(true);
         main_box.append(c);
     }
@@ -173,12 +201,38 @@ pub fn build_page() -> gtk::Widget {
         hotkey_state,
         hotkey_result,
         preset,
+        pos_state,
     });
 
-    // 后台任务结果槽：注册 / 移除 / 退出各一个
+    // 后台任务结果槽：注册 / 移除 / 退出 / 定位扩展各一个
     let reg_slot: Slot = Arc::new(Mutex::new(None));
     let unreg_slot: Slot = Arc::new(Mutex::new(None));
     let quit_slot: Slot = Arc::new(Mutex::new(None));
+    let pos_slot: Slot = Arc::new(Mutex::new(None));
+
+    // —— 信号：安装 / 移除定位扩展 ——
+    {
+        let ui = ui.clone();
+        let slot = pos_slot.clone();
+        pos_install_btn.connect_clicked(move |_| {
+            run_bg(&ui, &slot, || {
+                shell_ext::install()
+                    .map(|_| "扩展已安装".to_string())
+                    .map_err(|e| e.to_string())
+            });
+        });
+    }
+    {
+        let ui = ui.clone();
+        let slot = pos_slot.clone();
+        pos_remove_btn.connect_clicked(move |_| {
+            run_bg(&ui, &slot, || {
+                shell_ext::remove()
+                    .map(|_| "扩展已移除（重新登录后完全卸载）".to_string())
+                    .map_err(|e| e.to_string())
+            });
+        });
+    }
 
     // —— 信号：启动 / 退出面板 ——
     {
@@ -272,7 +326,7 @@ pub fn build_page() -> gtk::Widget {
     // —— 轮询：后台任务结果（150ms）+ 周期刷新（5s）——
     {
         let ui = ui.clone();
-        let slots = [reg_slot, unreg_slot, quit_slot];
+        let slots = [reg_slot, unreg_slot, quit_slot, pos_slot];
         let mut idx = 0usize;
         glib::timeout_add_local(Duration::from_millis(150), move || {
             let slot = &slots[idx % slots.len()];
@@ -346,6 +400,13 @@ impl Ui {
         if !panel_path().is_ok_and(|p| p.exists()) {
             self.autostart_state.set_text("未找到 yihu-panel（请先构建或安装发布包）");
         }
+
+        // 定位扩展
+        self.pos_state.set_text(if shell_ext::installed() {
+            "已安装（重新登录后生效）"
+        } else {
+            "未安装（位置由系统摆放，不固定）"
+        });
     }
 }
 
