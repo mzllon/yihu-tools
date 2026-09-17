@@ -464,13 +464,17 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
         entry.add_controller(ec_entry);
     }
 
-    // —— 失焦自动隐藏（隐藏本身引发的失焦不重复处理）——
+    // —— 失焦自动隐藏：仅对「曾拿到焦点」的窗口生效。
+    // CLI/快捷键触发的映射可能拿不到焦点（focus-stealing-prevention），
+    // 此时不能误判为用户点了别处 ——
     {
-        let win = win.clone();
+        let focused = Rc::new(Cell::new(false));
         let visible = deps.visible.clone();
         let slot = slot.clone();
         win.connect_notify_local(Some("is-active"), move |w, _| {
-            if !w.is_active() && w.is_visible() {
+            if w.is_active() {
+                focused.set(true);
+            } else if focused.get() && w.is_visible() {
                 hide_current(&visible, &slot);
             }
         });
