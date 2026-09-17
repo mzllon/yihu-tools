@@ -106,7 +106,7 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
     win.set_application(Some(app));
     win.set_title(Some("一呼"));
     win.set_icon_name(Some("tools.yihu.desktop"));
-    win.set_default_size(720, 520);
+    win.set_default_size(720, 440);
     win.set_resizable(false);
     win.set_hide_on_close(true);
     win.add_css_class("panel-root");
@@ -132,15 +132,20 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
 
     let store = gio::ListStore::new::<PanelItem>();
     let sel = gtk::SingleSelection::new(Some(store.clone()));
-    sel.set_autoselect(true);
+    // 不自动选中：默认集全是标题/胶囊行，高亮没有意义；
+    // 搜索结果出现时由刷新逻辑选中第一个可激活行
+    sel.set_autoselect(false);
     let factory = gtk::SignalListItemFactory::new();
     {
         let win = win.clone();
         let visible = visible.clone();
         let history = history.clone();
         let center = center.clone();
+        let entries = entries.clone();
         factory.connect_setup(setup_row);
-        factory.connect_bind(move |f, obj| bind_row(f, obj, &win, &visible, &history, &center));
+        factory.connect_bind(move |f, obj| {
+            bind_row(f, obj, &win, &visible, &history, &center, &entries)
+        });
     }
     let list = ListView::new(Some(sel.clone()), Some(factory));
     list.add_css_class("panel-list");
@@ -326,8 +331,11 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
                     break;
                 }
             }
-            sel.set_selected(next as u32);
-            list.scroll_to(next as u32, gtk::ListScrollFlags::empty(), None);
+            // 默认集可能整屏都是标题/胶囊行：没有可激活行就不动选择
+            if selectable_at(&store, next as u32) {
+                sel.set_selected(next as u32);
+                list.scroll_to(next as u32, gtk::ListScrollFlags::empty(), None);
+            }
             glib::Propagation::Stop
         });
         entry.add_controller(ec_entry);
@@ -388,25 +396,25 @@ fn dispatch_item(
     };
     let kind = item.kind();
     let payload = item.payload().to_string();
-    match kind.as_str() {
-        "app" => {
-            if launch_app(&payload) {
-                record(history, &format!("app:{payload}"));
-                hide_panel(win, visible);
-            }
-        }
-        "cap" => {
-            run_cap(&payload, center);
-            record(history, &format!("cap:{payload}"));
-            hide_panel(win, visible);
-        }
-        "calc" => {
-            win.clipboard().set_text(&payload);
-            item.set_subtitle("已复制".to_string());
-            record(history, "calc");
-        }
-        _ => {}
+    if kind == "calc" {
+        win.clipboard().set_text(&payload);
+        item.set_subtitle("已复制".to_string());
+        record(history, "calc");
+        return;
     }
+    perform_entry(
+        win,
+        visible,
+        history,
+        center,
+        &PanelEntry {
+            title: item.title().to_string(),
+            subtitle: item.subtitle().to_string(),
+            icon_spec: item.icon_spec().to_string(),
+            kind: if kind == "app" { "app" } else { "cap" },
+            payload,
+        },
+    );
 }
 
 fn toggle_panel(win: &Window, entry: &SearchEntry, visible: &AtomicBool) {
@@ -572,9 +580,8 @@ fn header_row(t: &str) -> PanelEntry {
     }
 }
 
-/// 空输入时的分组默认集，严格限量：最近 3 条（应用+能力按时间）→
-/// 快捷能力胶囊行 → 常用应用 3 条（按次数，跳过最近已展示的）。
-/// 历史为空时省去「最近」小节，不做空分区。
+/// 空输入时的分组默认集：最近（胶囊，应用+能力按时间，最多 4 个）→
+/// 快捷能力（胶囊 5 个）。全部为点击即触发的按钮，无普通行。
 fn default_rows(history: &mt_core::panel::History, entries: &[PanelEntry]) -> Vec<PanelEntry> {
     let find = |id: &str| {
         entries
@@ -584,14 +591,20 @@ fn default_rows(history: &mt_core::panel::History, entries: &[PanelEntry]) -> Ve
     };
     let mut rows = Vec::new();
 
-    let mut recent: Vec<PanelEntry> = {
+    let recent: Vec<PanelEntry> = {
         let mut hs = history.entries.clone();
         hs.sort_by(|a, b| b.last.cmp(&a.last).then(b.count.cmp(&a.count)));
-        hs.iter().filter_map(|h| find(&h.id)).take(3).collect()
+        hs.iter().filter_map(|h| find(&h.id)).take(4).collect()
     };
     if !recent.is_empty() {
         rows.push(header_row("最近"));
-        rows.append(&mut recent);
+        rows.push(PanelEntry {
+            title: String::new(),
+            subtitle: String::new(),
+            icon_spec: String::new(),
+            kind: "recent_chips",
+            payload: String::new(),
+        });
     }
 
     rows.push(header_row("快捷能力"));
@@ -602,28 +615,6 @@ fn default_rows(history: &mt_core::panel::History, entries: &[PanelEntry]) -> Ve
         kind: "chips",
         payload: String::new(),
     });
-
-    let recent_ids: std::collections::HashSet<String> = rows
-        .iter()
-        .filter(|e| e.kind == "app")
-        .map(|e| format!("app:{}", e.payload))
-        .collect();
-    let mut apps: Vec<&PanelEntry> = entries.iter().filter(|e| e.kind == "app").collect();
-    apps.sort_by(|a, b| {
-        let (ca, cb) = (history.count_of(&a.payload), history.count_of(&b.payload));
-        let (la, lb) = (history.last_of(&a.payload), history.last_of(&b.payload));
-        cb.cmp(&ca).then(lb.cmp(&la)).then(a.title.cmp(&b.title))
-    });
-    let top: Vec<PanelEntry> = apps
-        .into_iter()
-        .filter(|e| !recent_ids.contains(&format!("app:{}", e.payload)))
-        .take(3)
-        .cloned()
-        .collect();
-    if !top.is_empty() {
-        rows.push(header_row("常用应用"));
-        rows.extend(top);
-    }
     rows
 }
 
@@ -665,6 +656,71 @@ fn chip_buttons(
             b
         })
         .collect()
+}
+
+/// 最近胶囊：最近用过的应用/能力（按时间，最多 4 个），点击即触发。
+fn recent_chip_buttons(
+    win: &Window,
+    visible: &Arc<AtomicBool>,
+    history: &Rc<RefCell<mt_core::panel::History>>,
+    center: &PathBuf,
+    entries: &Rc<RefCell<Vec<PanelEntry>>>,
+) -> Vec<gtk::Button> {
+    let recent = default_rows(&history.borrow(), &entries.borrow())
+        .into_iter()
+        .filter(|e| matches!(e.kind, "app" | "cap"))
+        .take(4)
+        .collect::<Vec<_>>();
+    recent
+        .iter()
+        .map(|e| {
+            let b = gtk::Button::new();
+            b.add_css_class("panel-chip");
+            let bx = GtkBox::new(Orientation::Horizontal, 6);
+            let img = gtk::Image::new();
+            img.set_pixel_size(16);
+            img.set_from_gicon(&gicon_for_spec(&e.icon_spec));
+            bx.append(&img);
+            let lbl = Label::new(Some(&e.title));
+            lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            lbl.set_max_width_chars(12);
+            bx.append(&lbl);
+            b.set_child(Some(&bx));
+            let e = e.clone();
+            let win = win.clone();
+            let visible = visible.clone();
+            let history = history.clone();
+            let center = center.clone();
+            b.connect_clicked(move |_| {
+                perform_entry(&win, &visible, &history, &center, &e);
+            });
+            b
+        })
+        .collect()
+}
+
+/// 执行条目动作：app 启动 / cap 执行；成功后记历史并收起面板。
+fn perform_entry(
+    win: &Window,
+    visible: &AtomicBool,
+    history: &Rc<RefCell<mt_core::panel::History>>,
+    center: &PathBuf,
+    e: &PanelEntry,
+) {
+    match e.kind {
+        "app" => {
+            if launch_app(&e.payload) {
+                record(history, &format!("app:{}", e.payload));
+                hide_panel(win, visible);
+            }
+        }
+        "cap" => {
+            run_cap(&e.payload, center);
+            record(history, &format!("cap:{}", e.payload));
+            hide_panel(win, visible);
+        }
+        _ => {}
+    }
 }
 
 fn selectable_at(store: &gio::ListStore, pos: u32) -> bool {
@@ -824,6 +880,7 @@ fn bind_row(
     visible: &Arc<AtomicBool>,
     history: &Rc<RefCell<mt_core::panel::History>>,
     center: &PathBuf,
+    entries: &Rc<RefCell<Vec<PanelEntry>>>,
 ) {
     let li = obj.downcast_ref::<gtk::ListItem>().expect("ListItem");
     let item = li.item().and_downcast::<PanelItem>().expect("PanelItem");
@@ -842,7 +899,19 @@ fn bind_row(
             row.title.set_text(&item.title());
             row.title.add_css_class("section-header");
         }
-        // 快捷能力胶囊行：一行小按钮，直接触发对应能力
+        // 最近胶囊行：最近用过的应用/能力，点击即触发
+        "recent_chips" => {
+            row.icon.set_visible(false);
+            row.col.set_visible(false);
+            row.chips.set_visible(true);
+            while let Some(c) = row.chips.first_child() {
+                row.chips.remove(&c);
+            }
+            for b in recent_chip_buttons(win, visible, history, center, entries) {
+                row.chips.append(&b);
+            }
+        }
+        // 快捷能力胶囊行
         "chips" => {
             row.icon.set_visible(false);
             row.col.set_visible(false);
