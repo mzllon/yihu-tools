@@ -252,7 +252,9 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
             }
             if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
                 eprintln!(
-                    "yihu-panel: 行 {kinds:?}，高 {height}px，刷新 {:?}",
+                    "yihu-panel: 行 {kinds:?}，目标高 {height}px，实际 {}x{}，刷新 {:?}",
+                    win.width(),
+                    win.height(),
                     start.elapsed()
                 );
             }
@@ -370,8 +372,8 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
             let mut quit = false;
             while let Ok(cmd) = rx.try_recv() {
                 match cmd {
-                    Cmd::Toggle => toggle_panel(&win, &entry, &visible),
-                    Cmd::Show => show_panel(&win, &entry, &visible),
+                    Cmd::Toggle => toggle_panel(&win, &entry, &visible, &dirty),
+                    Cmd::Show => show_panel(&win, &entry, &visible, &dirty),
                     Cmd::Hide => hide_panel(&win, &visible),
                     Cmd::Quit => quit = true,
                 }
@@ -429,18 +431,26 @@ fn dispatch_item(
     );
 }
 
-fn toggle_panel(win: &Window, entry: &SearchEntry, visible: &AtomicBool) {
+fn toggle_panel(win: &Window, entry: &SearchEntry, visible: &AtomicBool, dirty: &Cell<bool>) {
     if win.is_visible() {
         hide_panel(win, visible);
     } else {
-        show_panel(win, entry, visible);
+        show_panel(win, entry, visible, dirty);
     }
 }
 
-fn show_panel(win: &Window, entry: &SearchEntry, visible: &AtomicBool) {
+fn show_panel(win: &Window, entry: &SearchEntry, visible: &AtomicBool, dirty: &Cell<bool>) {
     win.present();
     entry.grab_focus();
     visible.store(true, Ordering::Relaxed);
+    // 呼出后立即按当前内容校正一次高度
+    dirty.set(true);
+    if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
+        let w = win.clone();
+        glib::timeout_add_local_once(Duration::from_millis(200), move || {
+            eprintln!("yihu-panel: 呼出后实际尺寸 {}x{}", w.width(), w.height());
+        });
+    }
 }
 
 fn hide_panel(win: &Window, visible: &AtomicBool) {
