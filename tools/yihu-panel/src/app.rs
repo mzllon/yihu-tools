@@ -35,6 +35,7 @@ struct PanelEntry {
 
 /// 跨呼出共享的状态：窗口每次呼出重建，这些保持不变。
 struct Deps {
+    app: gtk::Application,
     visible: Arc<AtomicBool>,
     history: Rc<RefCell<mt_core::panel::History>>,
     center: PathBuf,
@@ -92,6 +93,7 @@ pub fn run_daemon() {
         )));
         let nuc = Rc::new(RefCell::new(build_nucleo(&entries.borrow())));
         let deps = Rc::new(Deps {
+            app: app.clone(),
             visible: visible.clone(),
             history,
             center: sibling("yihu"),
@@ -225,6 +227,7 @@ fn dispose(slot: &Slot) {
 /// 构建一局面板窗口并接线全部信号。
 fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
     let win = Window::new();
+    win.set_application(Some(&deps.app));
     win.set_title(Some("一呼"));
     win.set_icon_name(Some("tools.yihu.desktop"));
     win.set_resizable(false);

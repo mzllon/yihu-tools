@@ -7,7 +7,7 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const UUID: &str = "yihu-panel-placer@tools.yihu";
@@ -41,8 +41,40 @@ pub fn install() -> io::Result<()> {
     // 显式 0644：避免 umask 002 系统上出现组可写文件
     fs::set_permissions(&js, fs::Permissions::from_mode(0o644))?;
     fs::set_permissions(&meta, fs::Permissions::from_mode(0o644))?;
+    inject_shell_version(&meta);
     let _ = Command::new("gnome-extensions").args(["enable", UUID]).status();
     Ok(())
+}
+
+/// 把本机 gnome-shell 主版本号追加进 shell-version（已声明则不动）：
+/// 避免发行版升级 GNOME 大版本后扩展被版本校验拦截。
+fn inject_shell_version(meta_path: &Path) {
+    let Ok(out) = Command::new("gnome-shell").arg("--version").output() else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let Some(major) = text
+        .rsplit(' ')
+        .next()
+        .and_then(|v| v.split('.').next())
+        .map(|s| s.to_string())
+    else {
+        return;
+    };
+    let Ok(current) = fs::read_to_string(meta_path) else {
+        return;
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&current) else {
+        return;
+    };
+    if let Some(arr) = v.get_mut("shell-version").and_then(|x| x.as_array_mut()) {
+        if !arr.iter().any(|x| x.as_str() == Some(major.as_str())) {
+            arr.push(serde_json::Value::String(major));
+            if let Ok(text) = serde_json::to_string_pretty(&v) {
+                let _ = fs::write(meta_path, text);
+            }
+        }
+    }
 }
 
 /// 移除扩展文件（先禁用；失败不阻塞删除）。

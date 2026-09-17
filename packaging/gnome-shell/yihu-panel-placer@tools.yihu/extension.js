@@ -4,7 +4,7 @@
 // Wayland 客户端无自我定位接口，此能力只能由合成器一侧（Shell 扩展）提供。
 
 import Gio from 'gi://Gio';
-import Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const IFACE = `
 <node>
@@ -14,6 +14,10 @@ const IFACE = `
 </node>`;
 
 const WM_CLASS = 'tools.yihu.Panel';
+
+// GNOME 50 起 main.js 不再提供 default 导出，改用命名导出；
+// 兼容旧版（default 导出对象）与新版（命名导出）
+const lm = Main.layoutManager ?? Main.default?.layoutManager;
 
 export default class YihuPanelPlacerExtension {
     enable() {
@@ -39,7 +43,7 @@ export default class YihuPanelPlacerExtension {
         }
         const focus = global.display.get_focus_window();
         const index = focus ? focus.get_monitor() : global.display.get_primary_monitor();
-        const mon = Main.layoutManager.monitors[index] ?? Main.layoutManager.primaryMonitor;
+        const mon = lm.monitors[index] ?? lm.primaryMonitor;
         for (const actor of wins) {
             const mw = actor.meta_window;
             const frame = mw.get_frame_rect();

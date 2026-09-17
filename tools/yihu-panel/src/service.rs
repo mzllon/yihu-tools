@@ -171,20 +171,26 @@ pub fn run_status() -> i32 {
 
 /// 通知 GNOME Shell 定位扩展（可选组件）把面板摆到上部居中并置顶。
 /// 扩展未安装时静默忽略，位置由系统默认摆放。
+/// 窗口映射与扩展查找有先后，分多个时间点重试。
 pub fn call_placer() {
     std::thread::spawn(move || {
-        // 等 窗口完成映射，扩展才能找到它
-        std::thread::sleep(Duration::from_millis(150));
-        let _ = (|| -> zbus::Result<()> {
-            let conn = zbus::blocking::Connection::session()?;
-            let proxy = zbus::blocking::Proxy::new(
-                &conn,
-                "tools.yihu.ShellPlacer",
-                "/tools/yihu/ShellPlacer",
-                "tools.yihu.ShellPlacer",
-            )?;
-            let _: () = proxy.call("PlaceTop", &())?;
-            Ok(())
-        })();
+        for delay in [120u64, 300, 600] {
+            std::thread::sleep(Duration::from_millis(delay));
+            let ok = (|| -> zbus::Result<()> {
+                let conn = zbus::blocking::Connection::session()?;
+                let proxy = zbus::blocking::Proxy::new(
+                    &conn,
+                    "tools.yihu.ShellPlacer",
+                    "/tools/yihu/ShellPlacer",
+                    "tools.yihu.ShellPlacer",
+                )?;
+                let _: () = proxy.call("PlaceTop", &())?;
+                Ok(())
+            })()
+            .is_ok();
+            if ok {
+                return;
+            }
+        }
     });
 }
