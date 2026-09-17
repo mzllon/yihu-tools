@@ -196,6 +196,7 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
         let dirty = dirty.clone();
         let store = store.clone();
         let sel = sel.clone();
+        let win = win.clone();
         glib::timeout_add_local(Duration::from_millis(30), move || {
             let changed = nuc.borrow_mut().tick(4).changed;
             if !(changed || dirty.get()) {
@@ -235,10 +236,14 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
                     payload: String::new(),
                 });
             }
+            // 高度随内容自适应，封顶 MAX_WINDOW_H
+            let height = estimated_height(&rows);
+            let kinds: Vec<&str> = rows.iter().map(|e| e.kind).collect();
             store.remove_all();
             for e in rows {
                 store.append(&PanelItem::from_entry(&e));
             }
+            win.set_default_size(720, height);
             // 选中项若落在标题/胶囊等不可激活行上，挪到第一个可激活行
             if !selectable_at(&store, sel.selected()) {
                 if let Some(p) = first_selectable(&store) {
@@ -246,7 +251,10 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
                 }
             }
             if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
-                eprintln!("yihu-panel: 过滤+刷新 {:?}", start.elapsed());
+                eprintln!(
+                    "yihu-panel: 行 {kinds:?}，高 {height}px，刷新 {:?}",
+                    start.elapsed()
+                );
             }
             glib::ControlFlow::Continue
         });
@@ -396,6 +404,10 @@ fn dispatch_item(
     };
     let kind = item.kind();
     let payload = item.payload().to_string();
+    // 重建窗口期的竞态防护：读到空 payload 的条目直接忽略
+    if payload.is_empty() && kind != "calc" {
+        return;
+    }
     if kind == "calc" {
         win.clipboard().set_text(&payload);
         item.set_subtitle("已复制".to_string());
@@ -580,22 +592,31 @@ fn header_row(t: &str) -> PanelEntry {
     }
 }
 
+/// 最近使用条目：历史按时间排序后映射回条目（应用/能力），取前 n 个。
+fn recent_entries(
+    history: &mt_core::panel::History,
+    entries: &[PanelEntry],
+    n: usize,
+) -> Vec<PanelEntry> {
+    let mut hs = history.entries.clone();
+    hs.sort_by(|a, b| b.last.cmp(&a.last).then(b.count.cmp(&a.count)));
+    hs.iter()
+        .filter_map(|h| {
+            entries
+                .iter()
+                .find(|e| format!("{}:{}", e.kind, e.payload) == h.id)
+                .cloned()
+        })
+        .take(n)
+        .collect()
+}
+
 /// 空输入时的分组默认集：最近（胶囊，应用+能力按时间，最多 4 个）→
 /// 快捷能力（胶囊 5 个）。全部为点击即触发的按钮，无普通行。
 fn default_rows(history: &mt_core::panel::History, entries: &[PanelEntry]) -> Vec<PanelEntry> {
-    let find = |id: &str| {
-        entries
-            .iter()
-            .find(|e| format!("{}:{}", e.kind, e.payload) == id)
-            .cloned()
-    };
     let mut rows = Vec::new();
 
-    let recent: Vec<PanelEntry> = {
-        let mut hs = history.entries.clone();
-        hs.sort_by(|a, b| b.last.cmp(&a.last).then(b.count.cmp(&a.count)));
-        hs.iter().filter_map(|h| find(&h.id)).take(4).collect()
-    };
+    let recent = recent_entries(history, entries, 3);
     if !recent.is_empty() {
         rows.push(header_row("最近"));
         rows.push(PanelEntry {
@@ -666,11 +687,14 @@ fn recent_chip_buttons(
     center: &PathBuf,
     entries: &Rc<RefCell<Vec<PanelEntry>>>,
 ) -> Vec<gtk::Button> {
-    let recent = default_rows(&history.borrow(), &entries.borrow())
-        .into_iter()
-        .filter(|e| matches!(e.kind, "app" | "cap"))
-        .take(4)
-        .collect::<Vec<_>>();
+    let recent = recent_entries(&history.borrow(), &entries.borrow(), 4);
+    if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
+        eprintln!(
+            "yihu-panel: 最近胶囊 {} 个：{:?}",
+            recent.len(),
+            recent.iter().map(|e| &e.title).collect::<Vec<_>>()
+        );
+    }
     recent
         .iter()
         .map(|e| {
@@ -721,6 +745,21 @@ fn perform_entry(
         }
         _ => {}
     }
+}
+
+/// 窗口高度：随内容行数自适应，封顶 520（呼出路径只是改一个数值，无 IO）。
+fn estimated_height(rows: &[PanelEntry]) -> i32 {
+    const MAX_WINDOW_H: i32 = 520;
+    let content: i32 = rows
+        .iter()
+        .map(|e| match e.kind {
+            "header" => 30,
+            "chips" | "recent_chips" => 50,
+            _ => 58,
+        })
+        .sum();
+    // 搜索区 + 上下留白
+    (76 + content + 14).clamp(240, MAX_WINDOW_H)
 }
 
 fn selectable_at(store: &gio::ListStore, pos: u32) -> bool {
