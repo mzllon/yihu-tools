@@ -154,6 +154,10 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
     let scroll = ScrolledWindow::new();
     scroll.set_child(Some(&list));
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    // 内容自然高度 ≤ 520 时窗口贴合内容（无滚动条）；
+    // 超过 520 时窗口高度被 520 封顶，列表滚动
+    scroll.set_propagate_natural_height(true);
+    scroll.set_max_content_height(520);
     scroll.set_vexpand(true);
     card.append(&scroll);
     win.set_child(Some(&card));
@@ -237,13 +241,21 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
                 });
             }
             // 高度随内容自适应，封顶 MAX_WINDOW_H
-            let height = estimated_height(&rows);
             let kinds: Vec<&str> = rows.iter().map(|e| e.kind).collect();
             store.remove_all();
             for e in rows {
                 store.append(&PanelItem::from_entry(&e));
             }
-            win.set_default_size(720, height);
+            // 高度交给 GTK：滚动窗口把内容自然高度上报为窗口自然高度
+            //（propagate-natural-height，封顶由 max-content-height 决定），
+            // 窗口高度设为 -1（自然高度）即可贴合内容；无 IO。
+            let w = win.clone();
+            glib::idle_add_local_once(move || {
+                w.set_default_size(720, -1);
+                if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
+                    eprintln!("yihu-panel: 高度校正为自然高度，实际 {}x{}", w.width(), w.height());
+                }
+            });
             // 选中项若落在标题/胶囊等不可激活行上，挪到第一个可激活行
             if !selectable_at(&store, sel.selected()) {
                 if let Some(p) = first_selectable(&store) {
@@ -251,12 +263,7 @@ fn activate(app: &gtk::Application, rx: mpsc::Receiver<Cmd>, visible: Arc<Atomic
                 }
             }
             if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
-                eprintln!(
-                    "yihu-panel: 行 {kinds:?}，目标高 {height}px，实际 {}x{}，刷新 {:?}",
-                    win.width(),
-                    win.height(),
-                    start.elapsed()
-                );
+                eprintln!("yihu-panel: 行 {kinds:?}，刷新 {:?}", start.elapsed());
             }
             glib::ControlFlow::Continue
         });
@@ -755,21 +762,6 @@ fn perform_entry(
         }
         _ => {}
     }
-}
-
-/// 窗口高度：随内容行数自适应，封顶 520（呼出路径只是改一个数值，无 IO）。
-fn estimated_height(rows: &[PanelEntry]) -> i32 {
-    const MAX_WINDOW_H: i32 = 520;
-    let content: i32 = rows
-        .iter()
-        .map(|e| match e.kind {
-            "header" => 30,
-            "chips" | "recent_chips" => 50,
-            _ => 58,
-        })
-        .sum();
-    // 搜索区 + 上下留白
-    (76 + content + 14).clamp(240, MAX_WINDOW_H)
 }
 
 fn selectable_at(store: &gio::ListStore, pos: u32) -> bool {
