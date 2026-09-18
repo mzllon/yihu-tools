@@ -26,12 +26,15 @@ const LIST_KEY: &str = "custom-keybindings";
 #[derive(Debug, Clone)]
 pub struct Config {
     pub hotkey: String,
+    /// 摆放位置在「上部居中」基准上再上移的像素数
+    pub place_offset_up: i32,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             hotkey: DEFAULT_HOTKEY.into(),
+            place_offset_up: 100,
         }
     }
 }
@@ -61,6 +64,11 @@ impl Config {
             };
             match (k.trim(), v.trim()) {
                 ("hotkey", v) if !v.is_empty() => c.hotkey = v.to_string(),
+                ("place_offset_up", v) => {
+                    if let Ok(n) = v.parse::<i32>() {
+                        c.place_offset_up = n;
+                    }
+                }
                 _ => {}
             }
         }
@@ -68,7 +76,10 @@ impl Config {
     }
 
     pub fn to_text(&self) -> String {
-        format!("# 一呼面板配置\nhotkey = {}\n", self.hotkey)
+        format!(
+            "# 一呼面板配置\nhotkey = {}\nplace_offset_up = {}\n",
+            self.hotkey, self.place_offset_up
+        )
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -353,13 +364,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yihu-panel-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join("panel.conf");
-        fs::write(&p, "hotkey = <Alt>z\n").unwrap();
+        fs::write(&p, "hotkey = <Alt>z\nplace_offset_up = 80\n").unwrap();
         let c = Config::read_from(&p).unwrap();
         assert_eq!(c.hotkey, "<Alt>z");
+        assert_eq!(c.place_offset_up, 80);
         // 空文件/损坏行回退默认值
         fs::write(&p, "# 注释\nbadline\n").unwrap();
         let c = Config::read_from(&p).unwrap();
         assert_eq!(c.hotkey, DEFAULT_HOTKEY);
+        assert_eq!(c.place_offset_up, 100);
         fs::remove_dir_all(&dir).ok();
     }
 

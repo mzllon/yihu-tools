@@ -270,10 +270,11 @@ pub fn build_page() -> gtk::Widget {
         let ui = ui.clone();
         let slot = reg_slot.clone();
         reg_btn.connect_clicked(move |_| {
-            let ui = ui.clone();
             let binding = ui.selected_binding();
             run_bg(&ui, &slot, move || {
-                let cfg = panel::Config { hotkey: binding.clone() };
+                // load-modify-save：保留 place_offset_up 等已有配置
+                let mut cfg = panel::Config::load();
+                cfg.hotkey = binding.clone();
                 cfg.save().ok();
                 match panel_command().and_then(|cmd| panel::register_hotkey(&binding, &cmd)) {
                     Ok(()) => Ok(format!("已注册 {binding}")),
@@ -303,7 +304,9 @@ pub fn build_page() -> gtk::Widget {
                 return;
             }
             if let Some((_, binding)) = PRESETS.get(d.selected() as usize) {
-                panel::Config { hotkey: binding.to_string() }.save().ok();
+                let mut cfg = panel::Config::load();
+                cfg.hotkey = binding.to_string();
+                cfg.save().ok();
             }
         });
     }

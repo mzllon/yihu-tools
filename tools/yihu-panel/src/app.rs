@@ -193,9 +193,10 @@ fn summon(deps: &Deps, slot: &Slot) {
     };
     win.present();
     entry.grab_focus();
-    // 请求 Shell 扩展把面板摆到上部居中（未装扩展时静默忽略），
+    // 请求 Shell 扩展把面板摆到上部居中并按配置上移（未装扩展时静默忽略），
     // 摆放完成后窗口淡入，定位前的竞争窗口期对用户不可见
-    crate::service::call_placer();
+    let offset = mt_core::panel::Config::load().place_offset_up;
+    crate::service::call_placer(offset);
     {
         let w = win.clone();
         glib::timeout_add_local_once(Duration::from_millis(150), move || {

@@ -11,7 +11,9 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 const IFACE = `
 <node>
   <interface name="tools.yihu.ShellPlacer">
-    <method name="PlaceTop"/>
+    <method name="PlaceTop">
+      <arg direction="in" type="i" name="offset_up"/>
+    </method>
     <method name="Where">
       <arg direction="out" type="s"/>
     </method>
@@ -46,7 +48,8 @@ export default class YihuPanelPlacerExtension {
         global.get_window_actors().forEach((a) => this._watch(a.meta_window));
     }
 
-    PlaceTop() {
+    PlaceTop(offsetUp) {
+        this._offsetUp = offsetUp;
         this._placeAll();
     }
 
@@ -127,7 +130,7 @@ export default class YihuPanelPlacerExtension {
         const w = frame.width > 0 ? frame.width : 720;
         const h = frame.height > 0 ? frame.height : 300;
         const x = mon.x + Math.round((mon.width - w) / 2);
-        const y = mon.y + Math.round((mon.height - h) / 4);
+        const y = mon.y + Math.round((mon.height - h) / 4) - (this._offsetUp ?? 0);
         mw.move_frame(true, x, y);
         if (!mw.is_above()) {
             mw.make_above();
