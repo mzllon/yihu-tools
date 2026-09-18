@@ -12,6 +12,9 @@ const IFACE = `
 <node>
   <interface name="tools.yihu.ShellPlacer">
     <method name="PlaceTop"/>
+    <method name="Where">
+      <arg direction="out" type="s"/>
+    </method>
   </interface>
 </node>`;
 
@@ -47,6 +50,17 @@ export default class YihuPanelPlacerExtension {
         this._placeAll();
     }
 
+    Where() {
+        const a = global
+            .get_window_actors()
+            .find((a) => WM_CLASSES.includes(a.meta_window.get_wm_class()));
+        if (!a) {
+            return 'none';
+        }
+        const f = a.meta_window.get_frame_rect();
+        return `${f.x},${f.y} ${f.width}x${f.height}`;
+    }
+
     disable() {
         if (this._createdId) {
             global.display.disconnect(this._createdId);
@@ -63,6 +77,7 @@ export default class YihuPanelPlacerExtension {
     }
 
     _watch(mw) {
+        global.log(`yihu-placer: window-created class=${mw.get_wm_class()}`);
         const tryPlace = () => {
             const cls = mw.get_wm_class();
             if (cls && WM_CLASSES.includes(cls)) {
@@ -117,6 +132,9 @@ export default class YihuPanelPlacerExtension {
         if (!mw.is_above()) {
             mw.make_above();
         }
+        global.log(
+            `yihu-placer: 摆放 ${cls} -> ${x},${y}（显示器 ${mon.x},${mon.y} ${mon.width}x${mon.height}，帧 ${frame.width}x${frame.height}）`
+        );
     }
 
     _placeAll() {
