@@ -6,6 +6,7 @@
 
 pub mod autodark;
 pub mod panel;
+pub mod plugins;
 pub mod sun;
 
 use serde::Serialize;

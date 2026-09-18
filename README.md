@@ -137,6 +137,13 @@ Nautilus 右键顶级菜单（python3-nautilus 扩展，复制动作在 Nautilus
 | 计算/搜索 | 算式求值递归下降（含优先级/括号/右结合幂）；nucleo 模糊匹配（`YIHU_PANEL_BENCH=1` 可复现） |
 | 默认集 | 空输入 = 「最近」胶囊（应用/能力按时间，最多 4 个）+「快捷能力」胶囊 5 个；使用历史记于 `panel_history.json`；高度随内容自适应（封顶 520） |
 
+**插件系统（M3）**：插件 = 独立进程 + stdio 行式 JSON（协议 v1，向后兼容）。
+中心「插件」页可从本地目录安装、启停、查看权限；面板收起时插件进程
+随之结束（待命零增量），Rust 插件进程 PSS 实测 0.5MB。示例见
+`plugins/ts-convert`（Rust）与 `plugins/passgen`（Python），
+`scripts/install-example-plugins.sh` 一键装入。设计详见
+[docs/插件基座调研.md](docs/插件基座调研.md) 与 [docs/插件基座M3计划.md](docs/插件基座M3计划.md)。
+
 **屏幕位置**：Wayland 下应用无自我定位接口，默认由系统摆放（位置不固定）。
 中心「呼出面板」页可一键安装「面板定位扩展」（GNOME Shell 扩展，仅本用户，
 随中心分发）：安装后面板每次呼出自动「水平居中、垂直上 1/4 处」并置顶

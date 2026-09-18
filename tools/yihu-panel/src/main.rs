@@ -6,6 +6,8 @@
 
 mod app;
 mod calc;
+mod providers;
+mod sessions;
 mod service;
 
 fn main() {

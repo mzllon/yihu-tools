@@ -19,23 +19,26 @@ use gtk::{
 };
 
 use crate::calc;
+use crate::providers;
 use crate::service::{Cmd, BUS_NAME};
+use crate::sessions::PluginMgr;
 
 const MAX_SHOWN: usize = 100;
 
 /// 一条可展示/可执行的条目（nucleo 按标题匹配，其余字段随条目带回）
 #[derive(Clone)]
-struct PanelEntry {
-    title: String,
-    subtitle: String,
-    icon_spec: String,
-    kind: &'static str,
-    payload: String,
+pub struct PanelEntry {
+    pub title: String,
+    pub subtitle: String,
+    pub icon_spec: String,
+    pub kind: &'static str,
+    pub payload: String,
 }
 
 /// 跨呼出共享的状态：窗口每次呼出重建，这些保持不变。
 struct Deps {
     app: gtk::Application,
+    plugins: Rc<RefCell<PluginMgr>>,
     visible: Arc<AtomicBool>,
     history: Rc<RefCell<mt_core::panel::History>>,
     center: PathBuf,
@@ -87,13 +90,19 @@ pub fn run_daemon() {
         load_css();
 
         let history = Rc::new(RefCell::new(mt_core::panel::History::load()));
-        let entries = Rc::new(RefCell::new(build_entries(
-            &history.borrow(),
-            collect_apps(),
-        )));
-        let nuc = Rc::new(RefCell::new(build_nucleo(&entries.borrow())));
+        let caps = providers::BuiltinProvider::capabilities();
+        let apps = collect_apps();
+        // 条目全集 = 内置能力 + 应用（供默认集「最近」回查）；nucleo 只匹配应用
+        let entries = Rc::new(RefCell::new({
+            let mut v = caps.clone();
+            v.extend(apps.clone());
+            v
+        }));
+        let nuc = Rc::new(RefCell::new(build_nucleo(&apps)));
+        let plugins = Rc::new(RefCell::new(PluginMgr::new()));
         let deps = Rc::new(Deps {
             app: app.clone(),
+            plugins,
             visible: visible.clone(),
             history,
             center: sibling("yihu"),
@@ -117,13 +126,13 @@ pub fn run_daemon() {
                     match cmd {
                         Cmd::Toggle => {
                             if deps.visible.load(Ordering::Relaxed) {
-                                hide_current(&deps.visible, &slot);
+                                hide_panel(&deps, &slot);
                             } else {
                                 summon(&deps, &slot);
                             }
                         }
                         Cmd::Show => summon(&deps, &slot),
-                        Cmd::Hide => hide_current(&deps.visible, &slot),
+                        Cmd::Hide => hide_panel(&deps, &slot),
                         Cmd::Quit => quit = true,
                     }
                 }
@@ -144,10 +153,11 @@ pub fn run_bench() {
     let t0 = Instant::now();
     let apps = collect_apps();
     let t_apps = t0.elapsed();
-    let history = mt_core::panel::History::load();
-    let entries = build_entries(&history, apps);
+    let mut entries = providers::BuiltinProvider::capabilities();
+    entries.extend(apps.clone());
     let total = entries.len();
     let mut nuc = build_nucleo(&entries);
+    settle(&mut nuc);
     settle(&mut nuc);
     println!(
         "枚举应用 {} 条，总条目 {} 条，注入并完成首次匹配: {:?}",
@@ -182,8 +192,9 @@ pub fn run_bench() {
 /// 每次呼出销毁旧窗口、新建一份：Wayland 下客户端无定位接口，
 /// 隐藏后重新 present 不会重新走合成器的居中摆放，只有新映射才会。
 /// 共享状态（条目/搜索池/历史）在 Deps 中跨呼出保持，重建仅有控件成本。
-fn summon(deps: &Deps, slot: &Slot) {
+fn summon(deps: &Rc<Deps>, slot: &Slot) {
     dispose(slot);
+    deps.plugins.borrow_mut().ensure_sessions();
     let ui = build_panel_ui(deps, slot);
     *slot.borrow_mut() = Some(ui);
     let (win, entry) = {
@@ -213,12 +224,13 @@ fn summon(deps: &Deps, slot: &Slot) {
     }
 }
 
-/// 收起并销毁当前窗口（延迟 drop，避免在信号处理栈内析构控件）。
-fn hide_current(visible: &AtomicBool, slot: &Slot) {
+/// 收起面板：隐藏窗口、杀灭全部插件会话（待命零进程）、延迟销毁窗口。
+fn hide_panel(deps: &Deps, slot: &Slot) {
     if let Some(ui) = slot.borrow().as_ref() {
         ui.win.set_visible(false);
     }
-    visible.store(false, Ordering::Relaxed);
+    deps.visible.store(false, Ordering::Relaxed);
+    deps.plugins.borrow_mut().kill_all();
     dispose(slot);
     // 归还给 OS，守住待命 RSS（长驻进程堆回收惯例）
     unsafe { libc::malloc_trim(0) };
@@ -233,7 +245,7 @@ fn dispose(slot: &Slot) {
 }
 
 /// 构建一局面板窗口并接线全部信号。
-fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
+fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
     let win = Window::new();
     // 首帧透明：等定位扩展摆到位后再显示，避免「先错位后跳转」
     win.set_opacity(0.0);
@@ -261,15 +273,10 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
     sel.set_autoselect(false);
     let factory = gtk::SignalListItemFactory::new();
     {
-        let visible = deps.visible.clone();
-        let history = deps.history.clone();
-        let center = deps.center.clone();
-        let entries = deps.entries.clone();
+        let deps = deps.clone();
         let slot = slot.clone();
         factory.connect_setup(setup_row);
-        factory.connect_bind(move |f, obj| {
-            bind_row(f, obj, &visible, &history, &center, &entries, &slot)
-        });
+        factory.connect_bind(move |f, obj| bind_row(f, obj, &deps, &slot));
     }
     let list = ListView::new(Some(sel.clone()), Some(factory));
     list.add_css_class("panel-list");
@@ -293,19 +300,23 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
         let nuc = deps.nuc.clone();
         let query = deps.query.clone();
         let calc_row = deps.calc_row.clone();
+        let plugins = deps.plugins.clone();
         let dirty = deps.dirty.clone();
         entry.connect_search_changed(move |e| {
             let text = e.text().to_string();
             *calc_row.borrow_mut() = calc_entry(&text);
             *query.borrow_mut() = text;
-            let mut nuc = nuc.borrow_mut();
-            nuc.pattern.reparse(
-                0,
-                &query.borrow(),
-                nucleo::pattern::CaseMatching::Smart,
-                nucleo::pattern::Normalization::Smart,
-                false,
-            );
+            {
+                let mut nuc = nuc.borrow_mut();
+                nuc.pattern.reparse(
+                    0,
+                    &query.borrow(),
+                    nucleo::pattern::CaseMatching::Smart,
+                    nucleo::pattern::Normalization::Smart,
+                    false,
+                );
+            }
+            plugins.borrow_mut().broadcast(&query.borrow());
             dirty.set(true);
         });
     }
@@ -321,7 +332,11 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
         let store = store.clone();
         let sel = sel.clone();
         let win = win.clone();
+        let plugins = deps.plugins.clone();
         glib::timeout_add_local(Duration::from_millis(30), move || {
+            if plugins.borrow_mut().drain() {
+                dirty.set(true);
+            }
             let changed = nuc.borrow_mut().tick(4).changed;
             if !(changed || dirty.get()) {
                 return glib::ControlFlow::Continue;
@@ -342,13 +357,28 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
                     rows.push(e.clone());
                 }
             } else {
-                let nuc = nuc.borrow();
-                let snap = nuc.snapshot();
-                let n = snap
-                    .matched_item_count()
-                    .min((MAX_SHOWN - rows.len()) as u32);
-                for it in snap.matched_items(0..n) {
-                    rows.push(it.data.clone());
+                {
+                    let nuc = nuc.borrow();
+                    let snap = nuc.snapshot();
+                    let n = snap
+                        .matched_item_count()
+                        .min((MAX_SHOWN - rows.len()) as u32);
+                    for it in snap.matched_items(0..n) {
+                        rows.push(it.data.clone());
+                    }
+                }
+                // 内置能力 + 插件结果（同受 MAX_SHOWN 约束）
+                for e in providers::BuiltinProvider::query(&q) {
+                    if rows.len() >= MAX_SHOWN {
+                        break;
+                    }
+                    rows.push(e);
+                }
+                for e in plugins.borrow().latest_rows() {
+                    if rows.len() >= MAX_SHOWN {
+                        break;
+                    }
+                    rows.push(e);
                 }
             }
             if rows.is_empty() {
@@ -390,29 +420,23 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
 
     // —— 激活：按 kind 分发真实动作（回车 / 单击 / 双击）——
     {
-        let win = win.clone();
-        let visible = deps.visible.clone();
-        let history = deps.history.clone();
-        let center = deps.center.clone();
+        let deps = deps.clone();
         let store = store.clone();
         let slot = slot.clone();
         list.connect_activate(move |_, pos| {
-            dispatch_item(&win, &visible, &history, &center, &store, pos, &slot);
+            dispatch_item(&deps, &store, pos, &slot);
         });
     }
     {
         // 回车时焦点在搜索框，列表收不到按键——在搜索框上激活当前选中项
-        let win = win.clone();
-        let visible = deps.visible.clone();
-        let history = deps.history.clone();
-        let center = deps.center.clone();
+        let deps = deps.clone();
         let store = store.clone();
         let sel = sel.clone();
         let slot = slot.clone();
         entry.connect_activate(move |_| {
             let pos = sel.selected();
             if sel.model().map(|m| m.n_items()).unwrap_or(0) > pos {
-                dispatch_item(&win, &visible, &history, &center, &store, pos, &slot);
+                dispatch_item(&deps, &store, pos, &slot);
             }
         });
     }
@@ -420,11 +444,11 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
     // —— 键盘：ESC 隐藏；搜索框内 ↑/↓ 移动选择 ——
     let ec = gtk::EventControllerKey::new();
     {
-        let visible = deps.visible.clone();
+        let deps = deps.clone();
         let slot = slot.clone();
         ec.connect_key_pressed(move |_, key, _, _| {
             if key == gdk::Key::Escape {
-                hide_current(&visible, &slot);
+                hide_panel(&deps, &slot);
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -433,9 +457,9 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
     }
     win.add_controller(ec);
     entry.connect_stop_search({
-        let visible = deps.visible.clone();
+        let deps = deps.clone();
         let slot = slot.clone();
-        move |_| hide_current(&visible, &slot)
+        move |_| hide_panel(&deps, &slot)
     });
     {
         let sel = sel.clone();
@@ -484,13 +508,13 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
     // 此时不能误判为用户点了别处 ——
     {
         let focused = Rc::new(Cell::new(false));
-        let visible = deps.visible.clone();
+        let deps = deps.clone();
         let slot = slot.clone();
         win.connect_notify_local(Some("is-active"), move |w, _| {
             if w.is_active() {
                 focused.set(true);
             } else if focused.get() && w.is_visible() {
-                hide_current(&visible, &slot);
+                hide_panel(&deps, &slot);
             }
         });
     }
@@ -502,16 +526,8 @@ fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
     }
 }
 
-/// 按 kind 分发条目动作：app 启动 / cap 执行 / calc 复制。
-fn dispatch_item(
-    win: &Window,
-    visible: &AtomicBool,
-    history: &Rc<RefCell<mt_core::panel::History>>,
-    center: &PathBuf,
-    store: &gio::ListStore,
-    pos: u32,
-    slot: &Slot,
-) {
+/// 按 kind 分发条目动作：app 启动 / cap 执行 / calc 复制 / plugin 转发。
+fn dispatch_item(deps: &Deps, store: &gio::ListStore, pos: u32, slot: &Slot) {
     let Some(obj) = store.item(pos) else {
         return;
     };
@@ -525,15 +541,30 @@ fn dispatch_item(
         return;
     }
     if kind == "calc" {
-        win.clipboard().set_text(&payload);
+        if let Some(ui) = slot.borrow().as_ref() {
+            ui.win.clipboard().set_text(&payload);
+        }
         item.set_subtitle("已复制".to_string());
-        record(history, "calc");
+        record(&deps.history, "calc");
+        return;
+    }
+    if kind == "plugin" {
+        // v0 激活语义：宿主复制 payload（Wayland 下插件进程自行操作剪贴板
+        // 不可靠），并转发 activate 让插件感知
+        let Some((pid, pl)) = payload.split_once('|') else {
+            return;
+        };
+        if let Some(ui) = slot.borrow().as_ref() {
+            ui.win.clipboard().set_text(pl);
+        }
+        deps.plugins.borrow_mut().activate(pid, pl);
+        record(&deps.history, &format!("plugin:{pid}"));
+        hide_panel(deps, slot);
         return;
     }
     perform_entry(
-        visible,
-        history,
-        center,
+        deps,
+        slot,
         &PanelEntry {
             title: item.title().to_string(),
             subtitle: item.subtitle().to_string(),
@@ -541,7 +572,6 @@ fn dispatch_item(
             kind: if kind == "app" { "app" } else { "cap" },
             payload,
         },
-        slot,
     );
 }
 
@@ -561,48 +591,7 @@ fn watch_theme(win: &Window) {
     }
 }
 
-// ---- 提供者：能力 + 应用 ----
-
-/// 一呼内置能力（进程内执行；payload 见 run_cap）
-fn capabilities() -> Vec<PanelEntry> {
-    vec![
-        PanelEntry {
-            title: "切换到深色模式".into(),
-            subtitle: "一呼 · 能力".into(),
-            icon_spec: "weather-clear-night-symbolic".into(),
-            kind: "cap",
-            payload: "theme:dark".into(),
-        },
-        PanelEntry {
-            title: "切换到浅色模式".into(),
-            subtitle: "一呼 · 能力".into(),
-            icon_spec: "weather-clear-symbolic".into(),
-            kind: "cap",
-            payload: "theme:light".into(),
-        },
-        PanelEntry {
-            title: "打开一呼中心".into(),
-            subtitle: "一呼 · 能力".into(),
-            icon_spec: "tools.yihu.desktop".into(),
-            kind: "cap",
-            payload: "center".into(),
-        },
-        PanelEntry {
-            title: "打开广播页".into(),
-            subtitle: "一呼 · 能力".into(),
-            icon_spec: "applications-multimedia-symbolic".into(),
-            kind: "cap",
-            payload: "page:radio".into(),
-        },
-        PanelEntry {
-            title: "打开主题切换页".into(),
-            subtitle: "一呼 · 能力".into(),
-            icon_spec: "night-light-symbolic".into(),
-            kind: "cap",
-            payload: "page:autodark".into(),
-        },
-    ]
-}
+// ---- 提供者：应用枚举 ----
 
 /// 枚举当前用户可见的已安装应用（排除 NoDisplay/Hidden 等）。
 /// 仅在启动时调用，呼出路径不做任何枚举。
@@ -646,19 +635,6 @@ fn gicon_for_spec(spec: &str) -> gio::Icon {
     } else {
         gio::ThemedIcon::new(spec).upcast()
     }
-}
-
-/// 主列表：能力固定在头部，应用按使用次数/最近时间/名称排序。
-fn build_entries(history: &mt_core::panel::History, apps: Vec<PanelEntry>) -> Vec<PanelEntry> {
-    let mut apps = apps;
-    apps.sort_by(|a, b| {
-        let (ca, cb) = (history.count_of(&a.payload), history.count_of(&b.payload));
-        let (la, lb) = (history.last_of(&a.payload), history.last_of(&b.payload));
-        cb.cmp(&ca).then(lb.cmp(&la)).then(a.title.cmp(&b.title))
-    });
-    let mut all = capabilities();
-    all.extend(apps);
-    all
 }
 
 fn build_nucleo(entries: &[PanelEntry]) -> nucleo::Nucleo<PanelEntry> {
@@ -732,12 +708,7 @@ fn default_rows(history: &mt_core::panel::History, entries: &[PanelEntry]) -> Ve
 }
 
 /// 快捷能力胶囊：一行小按钮，点击直接触发（无需选中回车）。
-fn chip_buttons(
-    visible: &Arc<AtomicBool>,
-    history: &Rc<RefCell<mt_core::panel::History>>,
-    center: &PathBuf,
-    slot: &Slot,
-) -> Vec<gtk::Button> {
+fn chip_buttons(deps: &Rc<Deps>, slot: &Slot) -> Vec<gtk::Button> {
     const CHIPS: &[(&str, &str, &str)] = &[
         ("theme:dark", "深色", "weather-clear-night-symbolic"),
         ("theme:light", "浅色", "weather-clear-symbolic"),
@@ -756,15 +727,13 @@ fn chip_buttons(
             bx.append(&img);
             bx.append(&Label::new(Some(label)));
             b.set_child(Some(&bx));
-            let visible = visible.clone();
-            let history = history.clone();
-            let center = center.clone();
+            let deps = deps.clone();
             let slot = slot.clone();
             let payload = payload.to_string();
             b.connect_clicked(move |_| {
-                run_cap(&payload, &center);
-                record(&history, &format!("cap:{payload}"));
-                hide_current(&visible, &slot);
+                providers::activate_capability(&payload, &deps.center);
+                record(&deps.history, &format!("cap:{payload}"));
+                hide_panel(&deps, &slot);
             });
             b
         })
@@ -772,14 +741,8 @@ fn chip_buttons(
 }
 
 /// 最近胶囊：最近用过的应用/能力（按时间，最多 4 个），点击即触发。
-fn recent_chip_buttons(
-    visible: &Arc<AtomicBool>,
-    history: &Rc<RefCell<mt_core::panel::History>>,
-    center: &PathBuf,
-    entries: &Rc<RefCell<Vec<PanelEntry>>>,
-    slot: &Slot,
-) -> Vec<gtk::Button> {
-    let recent = recent_entries(&history.borrow(), &entries.borrow(), 4);
+fn recent_chip_buttons(deps: &Rc<Deps>, slot: &Slot) -> Vec<gtk::Button> {
+    let recent = recent_entries(&deps.history.borrow(), &deps.entries.borrow(), 4);
     if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
         eprintln!(
             "yihu-panel: 最近胶囊 {} 个：{:?}",
@@ -803,12 +766,10 @@ fn recent_chip_buttons(
             bx.append(&lbl);
             b.set_child(Some(&bx));
             let e = e.clone();
-            let visible = visible.clone();
-            let history = history.clone();
-            let center = center.clone();
+            let deps = deps.clone();
             let slot = slot.clone();
             b.connect_clicked(move |_| {
-                perform_entry(&visible, &history, &center, &e, &slot);
+                perform_entry(&deps, &slot, &e);
             });
             b
         })
@@ -816,24 +777,18 @@ fn recent_chip_buttons(
 }
 
 /// 执行条目动作：app 启动 / cap 执行；成功后记历史并收起面板。
-fn perform_entry(
-    visible: &AtomicBool,
-    history: &Rc<RefCell<mt_core::panel::History>>,
-    center: &PathBuf,
-    e: &PanelEntry,
-    slot: &Slot,
-) {
+fn perform_entry(deps: &Deps, slot: &Slot, e: &PanelEntry) {
     match e.kind {
         "app" => {
             if launch_app(&e.payload) {
-                record(history, &format!("app:{}", e.payload));
-                hide_current(visible, slot);
+                record(&deps.history, &format!("app:{}", e.payload));
+                hide_panel(deps, slot);
             }
         }
         "cap" => {
-            run_cap(&e.payload, center);
-            record(history, &format!("cap:{}", e.payload));
-            hide_current(visible, slot);
+            providers::activate_capability(&e.payload, &deps.center);
+            record(&deps.history, &format!("cap:{}", e.payload));
+            hide_panel(deps, slot);
         }
         _ => {}
     }
@@ -880,41 +835,6 @@ fn launch_app(desktop_id: &str) -> bool {
             eprintln!("yihu-panel: 未找到桌面条目 {desktop_id}");
             false
         }
-    }
-}
-
-fn run_cap(payload: &str, center: &PathBuf) {
-    match payload {
-        "theme:dark" => {
-            std::thread::spawn(|| {
-                let _ = mt_core::autodark::set_scheme(mt_core::autodark::Theme::Dark);
-            });
-        }
-        "theme:light" => {
-            std::thread::spawn(|| {
-                let _ = mt_core::autodark::set_scheme(mt_core::autodark::Theme::Light);
-            });
-        }
-        "center" => {
-            spawn_detached(center, &[]);
-        }
-        p if p.starts_with("page:") => {
-            let page = &p["page:".len()..];
-            spawn_detached(center, &["--page", page]);
-        }
-        _ => {}
-    }
-}
-
-fn spawn_detached(program: &PathBuf, args: &[&str]) {
-    if let Err(e) = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        eprintln!("yihu-panel: 启动 {} 失败：{e}", program.display());
     }
 }
 
@@ -989,15 +909,7 @@ fn setup_row(_: &gtk::SignalListItemFactory, obj: &glib::Object) {
     };
 }
 
-fn bind_row(
-    _: &gtk::SignalListItemFactory,
-    obj: &glib::Object,
-    visible: &Arc<AtomicBool>,
-    history: &Rc<RefCell<mt_core::panel::History>>,
-    center: &PathBuf,
-    entries: &Rc<RefCell<Vec<PanelEntry>>>,
-    slot: &Slot,
-) {
+fn bind_row(_: &gtk::SignalListItemFactory, obj: &glib::Object, deps: &Rc<Deps>, slot: &Slot) {
     let li = obj.downcast_ref::<gtk::ListItem>().expect("ListItem");
     let item = li.item().and_downcast::<PanelItem>().expect("PanelItem");
     // 安全性：同 set_data，键与类型由本文件保证
@@ -1023,7 +935,7 @@ fn bind_row(
             while let Some(c) = row.chips.first_child() {
                 row.chips.remove(&c);
             }
-            for b in recent_chip_buttons(visible, history, center, entries, slot) {
+            for b in recent_chip_buttons(deps, slot) {
                 row.chips.append(&b);
             }
         }
@@ -1035,7 +947,7 @@ fn bind_row(
             while let Some(c) = row.chips.first_child() {
                 row.chips.remove(&c);
             }
-            for b in chip_buttons(visible, history, center, slot) {
+            for b in chip_buttons(deps, slot) {
                 row.chips.append(&b);
             }
         }

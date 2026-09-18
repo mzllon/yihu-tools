@@ -1,0 +1,11 @@
+id = "ts-convert"
+name = "时间戳转换"
+version = "0.1.0"
+api = "^1"
+entry = "ts-convert"
+icon = "x-office-document"
+
+[[triggers]]
+keywords = ["ts", "时间戳"]
+
+permissions = []

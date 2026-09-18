@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mt-core", "tools/yihu", "tools/autodark-agent", "tools/yihu-panel"]
+members = ["crates/mt-core", "tools/yihu", "tools/autodark-agent", "tools/yihu-panel", "plugins/ts-convert"]
 
 [workspace.package]
 version = "0.1.0"

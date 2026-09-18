@@ -1,0 +1,11 @@
+id = "passgen"
+name = "密码生成"
+version = "0.1.0"
+api = "^1"
+entry = "passgen.py"
+icon = "text-x-generic"
+
+[[triggers]]
+keywords = ["pass", "密码"]
+
+permissions = []
