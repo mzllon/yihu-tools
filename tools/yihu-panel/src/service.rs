@@ -184,7 +184,11 @@ pub fn call_placer(offset_up: i32) {
                     "/tools/yihu/ShellPlacer",
                     "tools.yihu.ShellPlacer",
                 )?;
-                let _: () = proxy.call("PlaceTop", &offset_up)?;
+                // 新签名带偏移；对未更新的旧扩展回退无参调用
+                if proxy.call::<_, _, ()>("PlaceTop", &offset_up).is_ok() {
+                    return Ok(());
+                }
+                let _: () = proxy.call("PlaceTop", &())?;
                 Ok(())
             })()
             .is_ok();
