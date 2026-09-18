@@ -174,7 +174,7 @@ pub fn run_status() -> i32 {
 /// 窗口映射与扩展查找有先后，分多个时间点重试。
 pub fn call_placer() {
     std::thread::spawn(move || {
-        for delay in [120u64, 300, 600] {
+        for delay in [80u64, 200, 450] {
             std::thread::sleep(Duration::from_millis(delay));
             let ok = (|| -> zbus::Result<()> {
                 let conn = zbus::blocking::Connection::session()?;

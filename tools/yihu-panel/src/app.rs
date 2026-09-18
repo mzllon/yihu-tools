@@ -193,8 +193,15 @@ fn summon(deps: &Deps, slot: &Slot) {
     };
     win.present();
     entry.grab_focus();
-    // 请求 Shell 扩展把面板摆到上部居中（未装扩展时静默忽略）
+    // 请求 Shell 扩展把面板摆到上部居中（未装扩展时静默忽略），
+    // 摆放完成后窗口淡入，定位前的竞争窗口期对用户不可见
     crate::service::call_placer();
+    {
+        let w = win.clone();
+        glib::timeout_add_local_once(Duration::from_millis(150), move || {
+            w.set_opacity(1.0);
+        });
+    }
     deps.visible.store(true, Ordering::Relaxed);
     deps.dirty.set(true);
     if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
@@ -227,6 +234,8 @@ fn dispose(slot: &Slot) {
 /// 构建一局面板窗口并接线全部信号。
 fn build_panel_ui(deps: &Deps, slot: &Slot) -> PanelUi {
     let win = Window::new();
+    // 首帧透明：等定位扩展摆到位后再显示，避免「先错位后跳转」
+    win.set_opacity(0.0);
     win.set_application(Some(&deps.app));
     win.set_title(Some("一呼"));
     win.set_icon_name(Some("tools.yihu.desktop"));
