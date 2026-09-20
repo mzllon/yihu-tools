@@ -80,7 +80,8 @@ export default class YihuPanelPlacerExtension {
     }
 
     _watch(mw) {
-        global.log(`yihu-placer: window-created class=${mw.get_wm_class()}`);
+        // GNOME 50 移除了 global.log；GJS 的 console.* 全版本可用
+        console.log(`yihu-placer: window-created class=${mw.get_wm_class()}`);
         const tryPlace = () => {
             const cls = mw.get_wm_class();
             if (cls && WM_CLASSES.includes(cls)) {
@@ -135,7 +136,7 @@ export default class YihuPanelPlacerExtension {
         if (!mw.is_above()) {
             mw.make_above();
         }
-        global.log(
+        console.log(
             `yihu-placer: 摆放 ${cls} -> ${x},${y}（显示器 ${mon.x},${mon.y} ${mon.width}x${mon.height}，帧 ${frame.width}x${frame.height}）`
         );
     }

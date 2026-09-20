@@ -47,6 +47,13 @@ struct Deps {
     query: Rc<RefCell<String>>,
     calc_row: Rc<RefCell<Option<PanelEntry>>>,
     dirty: Rc<Cell<bool>>,
+    /// 呼出代数：每次 summon 递增；定位线程/兜底定时器凭它确认
+    /// 自己仍属于当前这次呼出，防止迟到回调作用于新一代窗口
+    gen: Rc<Cell<u64>>,
+    /// 本次呼出是否已淡入；5s 最后兜底定时器凭它避免重复/提前淡入
+    faded: Rc<Cell<bool>>,
+    /// 定位线程回传 FadeIn 用（与 zbus 命令共用一条泵）
+    fade_tx: mpsc::Sender<Cmd>,
 }
 
 /// 当前面板窗口及其专属控件（每次呼出重建一份）
@@ -69,8 +76,9 @@ type Slot = Rc<RefCell<Option<PanelUi>>>;
 pub fn run_daemon() {
     let (tx, rx) = mpsc::channel::<Cmd>();
     let visible = Arc::new(AtomicBool::new(false));
-    // 先于 GTK 声明总线名：占用即静默退出（天然单实例）
-    let conn = match crate::service::claim(tx, visible.clone()) {
+    // 先于 GTK 声明总线名：占用即静默退出（天然单实例）；
+    // tx 留一个克隆给 Deps，定位线程凭它回传淡入
+    let conn = match crate::service::claim(tx.clone(), visible.clone()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("yihu-panel: 总线名不可用，可能已有实例在运行：{e}");
@@ -111,6 +119,9 @@ pub fn run_daemon() {
             query: Rc::new(RefCell::new(String::new())),
             calc_row: Rc::new(RefCell::new(None)),
             dirty: Rc::new(Cell::new(false)),
+            gen: Rc::new(Cell::new(0)),
+            faded: Rc::new(Cell::new(false)),
+            fade_tx: tx.clone(),
         });
 
         let slot: Slot = Rc::new(RefCell::new(None));
@@ -134,6 +145,22 @@ pub fn run_daemon() {
                         Cmd::Show => summon(&deps, &slot),
                         Cmd::Hide => hide_panel(&deps, &slot),
                         Cmd::Quit => quit = true,
+                        Cmd::FadeIn(gen) => {
+                            if deps.gen.get() != gen {
+                                continue; // 上一代呼出的迟到淡入，丢弃
+                            }
+                            deps.faded.set(true);
+                            if let Some(ui) = slot.borrow().as_ref() {
+                                ui.win.set_opacity(1.0);
+                            }
+                            if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
+                                let ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0);
+                                eprintln!("yihu-panel: 淡入 gen={gen} 墙钟={ms}ms");
+                            }
+                        }
                     }
                 }
                 if quit {
@@ -204,14 +231,24 @@ fn summon(deps: &Rc<Deps>, slot: &Slot) {
     };
     win.present();
     entry.grab_focus();
-    // 请求 Shell 扩展把面板摆到上部居中并按配置上移（未装扩展时静默忽略），
-    // 摆放完成后窗口淡入，定位前的竞争窗口期对用户不可见
+    // 淡入由定位流程驱动：定位线程确认「窗口已配置尺寸且完成映射后摆放」
+    // 后发 FadeIn（gen 防跨呼出误伤）；扩展缺失/超时由下面的兜底定时器淡入。
+    // 固定延时会撞上 mutter 50 对映射前摆放的重置——先错位后跳转的根源。
+    deps.gen.set(deps.gen.get() + 1);
+    let gen = deps.gen.get();
+    deps.faded.set(false);
     let offset = yihu_core::panel::Config::load().place_offset_up;
-    crate::service::call_placer(offset);
+    crate::service::call_placer(offset, gen, deps.fade_tx.clone());
     {
+        // 最后兜底：正常由定位线程在定位落地后发 FadeIn；此处仅防线程
+        // 意外消亡导致窗口永不显示。faded 标志防止与正常路径重复淡入
+        let gen_cell = deps.gen.clone();
+        let faded = deps.faded.clone();
         let w = win.clone();
-        glib::timeout_add_local_once(Duration::from_millis(150), move || {
-            w.set_opacity(1.0);
+        glib::timeout_add_local_once(Duration::from_secs(5), move || {
+            if gen_cell.get() == gen && !faded.get() {
+                w.set_opacity(1.0);
+            }
         });
     }
     deps.visible.store(true, Ordering::Relaxed);
@@ -247,8 +284,11 @@ fn dispose(slot: &Slot) {
 /// 构建一局面板窗口并接线全部信号。
 fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
     let win = Window::new();
-    // 首帧透明：等定位扩展摆到位后再显示，避免「先错位后跳转」
-    win.set_opacity(0.0);
+    // 首帧近乎透明（0.01）：opacity=0 时 GTK 跳过渲染、不提交缓冲，
+    // 合成器永远无法完成配置映射，「等定位后再显示」会变成死锁；
+    // 0.01 足以触发真实绘制，肉眼不可见。等定位扩展在映射后把窗口
+    // 摆到位，再由 FadeIn 升到 1.0，避免「先错位后跳转」
+    win.set_opacity(0.01);
     win.set_application(Some(&deps.app));
     win.set_title(Some("一呼"));
     win.set_icon_name(Some("tools.yihu.desktop"));

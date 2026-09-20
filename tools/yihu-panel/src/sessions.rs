@@ -21,11 +21,15 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 pub enum PluginEvent {
     Results { plugin: String, query_id: u64, items: Vec<PanelEntry> },
-    Exited { plugin: String },
+    Exited { plugin: String, gen: u64 },
 }
 
 struct Session {
     id: String,
+    /// 会话代数：id 每次呼出都相同（如 passgen），只有 (id, gen) 唯一定位
+    /// 一次会话。旧代的迟到 Exited 事件若按 id 误配新一代会话，会对
+    /// 活进程 wait() 把主循环永久卡死（0×0 不可呼出的根源）。
+    gen: u64,
     child: Child,
     stdin: ChildStdin,
 }
@@ -40,6 +44,8 @@ pub struct PluginMgr {
     /// 连续失败超限，本运行期禁用的插件
     disabled_by_failures: HashSet<String>,
     query_seq: u64,
+    /// 会话代数计数器：每次 spawn 递增
+    gen: u64,
     /// 当前查询（文本, id）——过期结果丢弃
     current_query: Option<(String, u64)>,
     /// 各插件对当前查询的最新结果（query_id, rows）；未超期的旧结果保留，避免闪烁
@@ -56,6 +62,7 @@ impl PluginMgr {
             failures: Vec::new(),
             disabled_by_failures: HashSet::new(),
             query_seq: 0,
+            gen: 0,
             current_query: None,
             latest: HashMap::new(),
         }
@@ -108,6 +115,8 @@ impl PluginMgr {
 
     fn spawn_session(&mut self, inst: &plugins::Installed) -> io::Result<Session> {
         let id = inst.manifest.id.clone();
+        self.gen += 1;
+        let gen = self.gen;
         let entry = inst.entry_path();
         let mut child = Command::new(&entry)
             .current_dir(&inst.dir)
@@ -140,9 +149,9 @@ impl PluginMgr {
                     Err(_) => break,
                 }
             }
-            let _ = tx.send(PluginEvent::Exited { plugin: reader_id });
+            let _ = tx.send(PluginEvent::Exited { plugin: reader_id, gen });
         });
-        Ok(Session { id, child, stdin })
+        Ok(Session { id, gen, child, stdin })
     }
 
     /// 每次 keystroke：向全部会话广播查询。空文本清空插件结果。
@@ -198,19 +207,27 @@ impl PluginMgr {
                         dirty = true;
                     }
                 }
-                Ok(PluginEvent::Exited { plugin }) => {
-                    self.record_failure(&plugin);
-                    // 回收子进程并移除死会话；摘除其结果
-                    self.sessions.retain_mut(|s| {
-                        if s.id == plugin {
-                            let _ = s.child.wait();
-                            false
-                        } else {
-                            true
+                Ok(PluginEvent::Exited { plugin, gen }) => {
+                    // 只有 (id, gen) 都匹配才认账：旧代（已收起会话）的迟到
+                    // 退出事件直接丢弃，否则按 id 会误配新一代活会话，
+                    // 对活进程 wait() 卡死主循环（面板从此呼不出的根源）。
+                    if let Some(i) = self
+                        .sessions
+                        .iter()
+                        .position(|s| s.id == plugin && s.gen == gen)
+                    {
+                        let s = &mut self.sessions[i];
+                        // 读线程已见 stdout EOF；组级 SIGKILL 确保进程真正
+                        // 终结，wait() 与 kill_all 同约定（有界）
+                        unsafe {
+                            libc::kill(-(s.child.id() as i32), libc::SIGKILL);
                         }
-                    });
-                    if self.latest.remove(&plugin).is_some() {
-                        dirty = true;
+                        let _ = s.child.wait();
+                        self.sessions.remove(i);
+                        self.record_failure(&plugin);
+                        if self.latest.remove(&plugin).is_some() {
+                            dirty = true;
+                        }
                     }
                 }
                 Err(_) => break,
