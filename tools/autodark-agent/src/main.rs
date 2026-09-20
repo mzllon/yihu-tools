@@ -3,7 +3,7 @@
 //! 由 systemd 用户定时器每分钟调用一次（`autodark-agent apply`），
 //! 进程按需启动、即退即走，常驻资源为零。
 
-use mt_core::autodark;
+use yihu_core::autodark;
 
 fn main() {
     let cmd = std::env::args().nth(1);

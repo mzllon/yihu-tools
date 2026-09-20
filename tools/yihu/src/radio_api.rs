@@ -6,6 +6,7 @@
 
 use gtk::gio;
 use gtk::gio::prelude::FileExtManual;
+use yihu_core::paths;
 use serde_json::Value;
 use std::fs;
 use std::io;
@@ -160,21 +161,10 @@ pub fn parse_search(json: &str) -> Result<Vec<Channel>, String> {
         .collect())
 }
 
-// ---- 收藏（~/.config/minitools/radio_favorites.json）----
-
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
-}
+// ---- 收藏（~/.config/yihu/radio_favorites.json；旧版路径自动迁移）----
 
 pub fn favorites_path() -> PathBuf {
-    // 与主题配置同一套 XDG 约定，便于整体备份与迁移。
-    std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|v| v.starts_with('/'))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"))
-        .join("minitools")
-        .join("radio_favorites.json")
+    paths::config_file("radio_favorites.json")
 }
 
 pub fn load_favorites_from(path: &Path) -> Vec<Favorite> {
@@ -182,7 +172,14 @@ pub fn load_favorites_from(path: &Path) -> Vec<Favorite> {
 }
 
 pub fn load_favorites() -> Vec<Favorite> {
-    load_favorites_from(&favorites_path())
+    let current = favorites_path();
+    if current.exists() {
+        return load_favorites_from(&current);
+    }
+    let legacy = paths::legacy_config_file("radio_favorites.json");
+    let list = load_favorites_from(&legacy);
+    let _ = paths::migrate_one("radio_favorites.json");
+    list
 }
 
 pub fn save_favorites_to(path: &Path, list: &[Favorite]) -> io::Result<()> {

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SysDash
+GenericName=系统仪表盘
+Comment=一呼· CPU / 内存 / 磁盘 / 负载实时监控
+Exec=${HOME}/.local/lib/yihu/sysdash
+Icon=tools.yihu.desktop
+Terminal=false
+Categories=System;Monitor;
+StartupNotify=true

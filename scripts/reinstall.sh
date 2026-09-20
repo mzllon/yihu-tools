@@ -147,9 +147,16 @@ def main():
         ext = base / 'nautilus-python/extensions/copy_absolute_path.py'
         owned_file(ext)
         if ext.exists() and (payload / 'copy_absolute_path.py').exists():
-            if ext.read_bytes() != (payload / 'copy_absolute_path.py').read_bytes():
+            existing = ext.read_text()
+            wanted = (payload / 'copy_absolute_path.py').read_text()
+            # Accept exactly the previous official MiniTools variant and migrate
+            # its two branding-only lines; reject every other custom change.
+            legacy = existing.replace('MiniTools：Nautilus', '一呼：Nautilus').replace(
+                'MiniTools::CopyAbsolutePath', 'Yihu::CopyAbsolutePath'
+            )
+            if legacy != wanted:
                 fail(f'Unknown/custom extension; preserve and inspect manually: {ext}')
-            updates[ext] = (payload / 'copy_absolute_path.py').read_bytes()
+            updates[ext] = wanted.encode()
             extension_updated = True
     units = {}
     unitdir = config / 'systemd/user'

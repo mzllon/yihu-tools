@@ -19,7 +19,6 @@ fn main() {
                 let _ = writeln!(out, r#"{{"type":"ready"}}"#);
             }
             Some("query") => {
-                let id = msg["id"].as_u64().unwrap_or(0);
                 let text = msg["text"].as_str().unwrap_or("").trim().to_string();
                 for item in handle_query(&text) {
                     let _ = writeln!(out, "{item}");

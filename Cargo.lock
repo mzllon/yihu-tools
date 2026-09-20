@@ -257,7 +257,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "autodark-agent"
 version = "0.1.0"
 dependencies = [
- "mt-core",
+ "yihu-core",
 ]
 
 [[package]]
@@ -1158,16 +1158,6 @@ dependencies = [
  "futures-util",
  "serde",
  "zbus 3.15.2",
-]
-
-[[package]]
-name = "mt-core"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "toml 0.8.23",
 ]
 
 [[package]]
@@ -2202,8 +2192,18 @@ dependencies = [
  "ksni",
  "libadwaita",
  "mpris-server",
- "mt-core",
  "serde_json",
+ "yihu-core",
+]
+
+[[package]]
+name = "yihu-core"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -2212,10 +2212,10 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "libc",
- "mt-core",
  "nucleo",
  "serde",
  "serde_json",
+ "yihu-core",
  "zbus 4.4.0",
 ]
 

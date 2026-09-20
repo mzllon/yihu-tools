@@ -83,12 +83,12 @@ pub fn activate_capability(payload: &str, center: &PathBuf) {
     match payload {
         "theme:dark" => {
             std::thread::spawn(|| {
-                let _ = mt_core::autodark::set_scheme(mt_core::autodark::Theme::Dark);
+                let _ = yihu_core::autodark::set_scheme(yihu_core::autodark::Theme::Dark);
             });
         }
         "theme:light" => {
             std::thread::spawn(|| {
-                let _ = mt_core::autodark::set_scheme(mt_core::autodark::Theme::Light);
+                let _ = yihu_core::autodark::set_scheme(yihu_core::autodark::Theme::Light);
             });
         }
         "center" => {

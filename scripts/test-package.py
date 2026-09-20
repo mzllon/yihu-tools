@@ -89,7 +89,7 @@ else:
     ext = home / '.local/share/nautilus-python/extensions/copy_absolute_path.py'
     ext.parent.mkdir(parents=True)
     ext.write_bytes((package / 'copy_absolute_path.py').read_bytes())
-    config = home / 'config/minitools/autodark.conf'
+    config = home / 'config/yihu/autodark.conf'
     config.parent.mkdir()
     config.write_text('preserve this feature configuration')
     third = home / 'config/Code/User/settings.json'

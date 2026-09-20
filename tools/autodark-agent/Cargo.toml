@@ -2,7 +2,7 @@
 name = "autodark-agent"
 version.workspace = true
 edition.workspace = true
-description = "MiniTools · 自动深浅色切换执行器（无 UI，供 systemd 定时器调用）"
+description = "一呼 · 自动深浅色切换执行器（无 UI，供 systemd 定时器调用）"
 
 [dependencies]
-mt-core = { path = "../../crates/mt-core" }
+yihu-core = { path = "../../crates/yihu-core" }

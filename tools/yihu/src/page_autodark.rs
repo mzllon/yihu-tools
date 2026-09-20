@@ -1,6 +1,6 @@
 //! 中心「主题切换」页：由独立版 autodark GUI 平移而来。
 //!
-//! 配置写入 `~/.config/minitools/autodark.conf`，启停 systemd 用户
+//! 配置写入 `~/.config/yihu/autodark.conf`（旧版 `minitools` 路径自动迁移），启停 systemd 用户
 //! 定时器；实际切换由无 UI 的 `autodark-agent` 每分钟执行。
 
 use adw::prelude::*;
@@ -16,8 +16,8 @@ use std::process::Command;
 use std::rc::Rc;
 use std::time::Duration;
 
-use mt_core::autodark::{self, Config, Mode};
-use mt_core::sun;
+use yihu_core::autodark::{self, Config, Mode};
+use yihu_core::sun;
 
 use crate::page_shell;
 

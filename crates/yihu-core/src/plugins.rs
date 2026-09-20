@@ -90,16 +90,6 @@ fn data_home() -> PathBuf {
         })
 }
 
-fn config_home() -> PathBuf {
-    std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|v| v.starts_with('/'))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".config")
-        })
-}
-
 /// 已安装插件的注册表根目录
 pub fn plugins_dir() -> PathBuf {
     data_home().join("yihu/plugins")
@@ -107,7 +97,7 @@ pub fn plugins_dir() -> PathBuf {
 
 /// 插件启停状态文件
 pub fn state_path() -> PathBuf {
-    config_home().join("minitools/plugins_state.json")
+    crate::paths::config_file("plugins_state.json")
 }
 
 /// 已安装插件（manifest + 所在目录）
@@ -234,7 +224,15 @@ pub struct PluginsState {
 
 impl PluginsState {
     pub fn load() -> PluginsState {
-        Self::read_from(&state_path()).unwrap_or_default()
+        let current = state_path();
+        let result = if current.exists() {
+            Self::read_from(&current).unwrap_or_default()
+        } else {
+            Self::read_from(&crate::paths::legacy_config_file("plugins_state.json"))
+                .unwrap_or_default()
+        };
+        let _ = crate::paths::migrate_one("plugins_state.json");
+        result
     }
 
     pub fn read_from(path: &Path) -> io::Result<PluginsState> {

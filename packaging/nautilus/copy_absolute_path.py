@@ -1,4 +1,4 @@
-"""MiniTools：Nautilus 右键「复制绝对路径」（顶级菜单项）。
+"""一呼：Nautilus 右键「复制绝对路径」（顶级菜单项）。
 
 需要安装 python3-nautilus（sudo apt install python3-nautilus），
 随后将本文件放到 ~/.local/share/nautilus-python/extensions/。
@@ -53,7 +53,7 @@ class CopyAbsolutePathExtension(GObject.GObject, Nautilus.MenuProvider):
         if not paths:
             return []
         item = Nautilus.MenuItem(
-            name="MiniTools::CopyAbsolutePath",
+            name="Yihu::CopyAbsolutePath",
             label="复制绝对路径",
             tip="复制所选文件的绝对路径到剪贴板",
         )

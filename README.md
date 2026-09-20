@@ -17,14 +17,14 @@
    源自实测教训；后台功能零常驻或近零常驻（能用定时器就不驻留进程）；
 2. **跨平台**：Linux/GNOME 先行，能力层与执行端保持平台无关，
    逐步覆盖 Windows / macOS；凡与低开销冲突的选型一律让位；
-3. **可扩展**：多工具共享核心逻辑（`mt-core`），能力向统一插件描述
+3. **可扩展**：多工具共享核心逻辑（`yihu-core`），能力向统一插件描述
    （清单 + 入口 + 权限）演进，单语言 Rust；
 4. **UI 美观**：libadwaita 原生观感，跟随系统深浅色，CSS 自定义样式。
 
 > **为什么不是 Tauri**：项目最初采用 Rust + Tauri 2（系统 WebView 方案），
 > 实测 Linux 上 WebKitGTK 的固定开销就达 ~158 MB（PSS），无论页面多简单
 > 都省不下来。**WebView UI 与「百 MB 以内」的内存预算在 Linux 上不兼容，
-> 勿再回头。** 切换只动 UI 层，共享库 `mt-core` 原样保留——分层设计的价值。
+> 勿再回头。** 切换只动 UI 层，共享库 `yihu-core` 原样保留——分层设计的价值。
 
 ## 能力一览（统一入口：「一呼」中心）
 
@@ -45,7 +45,7 @@
 
 ```
 ┌─ 一呼中心 · 主题切换页 ────────┐      ┌─ systemd --user ─────────┐
-│ 写 ~/.config/minitools/autodark.conf │ ──▶ │ yihu-autodark.timer      │
+│ 写 ~/.config/yihu/autodark.conf │ ──▶ │ yihu-autodark.timer      │
 │ 启停定时器、显示状态/下次切换        │      │ 每分钟 → autodark-agent  │
 └──────────────────────────────┘      └──────────────────────────┘
                                               │ 读配置 → 判定目标主题
@@ -54,7 +54,7 @@
 ```
 
 - **切换判定**：自定义时间（支持跨零点）或日出至日落（NOAA 天文算法，
-  `mt-core::sun`，纯计算无网络；坐标手动配置）；
+  `yihu-core::sun`，纯计算无网络；坐标手动配置）；
 - **常驻成本为零**：agent 无 GTK 依赖，按需启动、即退即走。
 
 ## 「复制绝对路径」
@@ -84,7 +84,7 @@ Nautilus 右键顶级菜单（python3-nautilus 扩展，复制动作在 Nautilus
 来自蜻蜓FM 公开 Web 接口（`rapi.qtfm.cn`，搜索为 `search.qingting.fm`），
 播放为 `ls.qingting.fm` 的 64k HLS 流，由 `gst-launch-1.0 playbin`
 **子进程**完成——中心 RSS 不因播放增长，停止或退出一呼即结束子进程；
-关窗驻留托盘时声音继续。收藏保存在 `~/.config/minitools/radio_favorites.json`。
+关窗驻留托盘时声音继续。收藏保存在 `~/.config/yihu/radio_favorites.json`。
 
 - 接口无官方协议保障（第三方客户端通行用法），解析失败只影响在线列表，收藏仍可播；
 - 播放依赖（gst-play、TS 解复用、AAC 解码、pulsesink）缺失时，广播页出现
@@ -158,7 +158,7 @@ Nautilus 右键顶级菜单（python3-nautilus 扩展，复制动作在 Nautilus
 ```
 yihu-tools/
 ├── Cargo.toml                  # workspace 根
-├── crates/mt-core/             # 共享核心库
+├── crates/yihu-core/             # 共享核心库
 │   ├── src/lib.rs              #   /proc、statvfs 系统信息读取、进程查找
 │   ├── src/autodark.rs         #   主题配置/调度/gsettings 应用
 │   ├── src/panel.rs            #   面板配置/GNOME 自定义快捷键合并注册
@@ -201,7 +201,7 @@ sudo apt install -y gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-pl
 ```bash
 cargo build --release                # 全部工具
 cargo run -p yihu                    # 中心（推荐从「活动」启动 一呼）
-cargo test -p mt-core                # 共享库单元测试
+cargo test -p yihu-core                # 共享库单元测试
 ./scripts/build-package.sh           # locked release 构建并生成 dist/*.tar.gz
 python3 scripts/gen_icon.py yihu    # 重新生成图标（yihu/ping/sysdash/autodark）
 ```
@@ -259,7 +259,7 @@ gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings
 ## 新增一个能力的步骤
 
 1. 执行端视形态新增（中心页面 / 无 UI agent / Nautilus 扩展）；
-2. 复用 `mt-core`；新系统数据逻辑优先沉淀进 `mt-core`；
+2. 复用 `yihu-core`；新系统数据逻辑优先沉淀进 `yihu-core`；
 3. 后台型功能优先「中心配置 + systemd 用户定时器 + 无 UI agent」架构；
 4. 低频刷新 GUI 一律 `GSK_RENDERER=cairo`；
 5. 图标样式在 `scripts/gen_icon.py` 中扩展一个绘制函数。

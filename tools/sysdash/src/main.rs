@@ -1,6 +1,6 @@
-//! SysDash — MiniTools 的系统仪表盘（GTK4 + libadwaita 原生实现）。
+//! SysDash — 一呼的退役系统仪表盘（GTK4 + libadwaita 原生实现）。
 //!
-//! 结构约定：`mt-core` 负责系统信息读取，UI 在主线程用
+//! 结构约定：`yihu-core` 负责系统信息读取，UI 在主线程用
 //! `glib::timeout_add_local` 每秒采样刷新。无 WebView、无 IPC。
 
 use adw::prelude::*;
@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-const APP_ID: &str = "com.ubuntuminitools.sysdash";
+const APP_ID: &str = "tools.yihu.sysdash";
 const MAX_POINTS: usize = 90;
 
 fn main() -> glib::ExitCode {
@@ -29,7 +29,7 @@ fn main() -> glib::ExitCode {
 // ---- 状态与刷新 ----
 
 struct Dashboard {
-    prev_cpu: RefCell<Option<mt_core::CpuTimes>>,
+    prev_cpu: RefCell<Option<yihu_core::CpuTimes>>,
     history: RefCell<Vec<f32>>,
     core_bars: RefCell<Vec<(ProgressBar, Label)>>,
     cores_box: FlowBox,
@@ -48,11 +48,11 @@ struct Dashboard {
 impl Dashboard {
     fn refresh(&self) {
         // CPU：与上次采样差分出使用率
-        let Ok(cur) = mt_core::read_cpu_times() else {
+        let Ok(cur) = yihu_core::read_cpu_times() else {
             return;
         };
         let (pct, per_core) = match self.prev_cpu.borrow().as_ref() {
-            Some(p) => mt_core::cpu_usage(p, &cur),
+            Some(p) => yihu_core::cpu_usage(p, &cur),
             None => (0.0, vec![0.0; cur.cores.len()]),
         };
         *self.prev_cpu.borrow_mut() = Some(cur);
@@ -75,21 +75,21 @@ impl Dashboard {
             }
         }
 
-        if let Ok(m) = mt_core::read_mem_info() {
+        if let Ok(m) = yihu_core::read_mem_info() {
             set_bar(&self.mem_bar, &self.mem_text, m.used_kb(), m.total_kb, fmt_kib);
             set_bar(&self.swap_bar, &self.swap_text, m.swap_used_kb, m.swap_total_kb, fmt_kib);
         }
 
-        if let Ok(d) = mt_core::read_disk_usage("/") {
+        if let Ok(d) = yihu_core::read_disk_usage("/") {
             set_bar(&self.disk_bar, &self.disk_text, d.used_bytes(), d.total_bytes, fmt_bytes);
         }
 
-        if let Ok(load) = mt_core::read_loadavg() {
+        if let Ok(load) = yihu_core::read_loadavg() {
             for (lbl, v) in self.load_labels.iter().zip(load.iter()) {
                 lbl.set_text(&format!("{v:.2}"));
             }
         }
-        if let Ok(secs) = mt_core::read_uptime_secs() {
+        if let Ok(secs) = yihu_core::read_uptime_secs() {
             self.uptime_label.set_text(&fmt_uptime(secs as u64));
         }
     }
@@ -161,7 +161,7 @@ fn build_ui(app: &Application) {
     // 跟随系统深浅色模式（不在代码里强制深色）
     load_css();
 
-    let host = mt_core::read_host_info();
+    let host = yihu_core::read_host_info();
 
     // 头部：标题（主机名 · 内核）+ 右侧运行时长
     let header = HeaderBar::new();

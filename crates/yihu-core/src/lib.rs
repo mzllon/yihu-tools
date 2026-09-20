@@ -1,4 +1,4 @@
-//! MiniTools 共享核心库。
+//! 一呼共享核心库。
 //!
 //! 封装 Linux `/proc`、`statvfs` 等系统信息的纯读取逻辑，
 //! 以及自动深浅色主题切换的配置/调度/应用，
@@ -6,6 +6,7 @@
 
 pub mod autodark;
 pub mod panel;
+pub mod paths;
 pub mod plugins;
 pub mod sun;
 

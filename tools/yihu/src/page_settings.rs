@@ -136,7 +136,7 @@ impl Ui {
         });
 
         // 中心进程资源
-        self.center_res.set_text(&match mt_core::find_process_stats("yihu") {
+        self.center_res.set_text(&match yihu_core::find_process_stats("yihu") {
             Some((rss, pss)) => {
                 format!("运行中 · RSS {:.0} MB · 实际 {:.0} MB", mb(rss), mb(pss))
             }

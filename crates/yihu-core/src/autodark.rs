@@ -8,6 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::paths;
 use crate::sun;
 
 /// 切换模式。
@@ -61,16 +62,40 @@ impl Default for Config {
 
 impl Config {
     pub fn config_path() -> PathBuf {
-        let home = std::env::var("XDG_CONFIG_HOME").ok().filter(|v| !v.is_empty());
-        let base = match home {
-            Some(h) => PathBuf::from(h),
-            None => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".config"),
-        };
-        base.join("minitools/autodark.conf")
+        paths::config_file("autodark.conf")
     }
 
     pub fn load() -> Config {
-        Self::read_from(&Self::config_path()).unwrap_or_default()
+        // 新路径优先；迁移期间从旧命名空间回退，并复制一份到新路径。
+        match paths::read_compatible("autodark.conf") {
+            Ok(text) => {
+                let cfg = Self::read_text(&text).unwrap_or_default();
+                let _ = paths::migrate_one("autodark.conf");
+                cfg
+            }
+            Err(_) => Config::default(),
+        }
+    }
+
+    fn read_text(text: &str) -> io::Result<Config> {
+        let mut c = Config::default();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let (k, v) = (k.trim(), v.trim());
+            match k {
+                "enabled" => c.enabled = v == "true",
+                "mode" => c.mode = if v == "sun" { Mode::Sun } else { Mode::Custom },
+                "light_time" => if let Some(t) = parse_hm(v) { c.light_time = t },
+                "dark_time" => if let Some(t) = parse_hm(v) { c.dark_time = t },
+                "latitude" => if let Ok(f) = v.parse::<f64>() { c.latitude = f.clamp(-89.0, 89.0) },
+                "longitude" => if let Ok(f) = v.parse::<f64>() { c.longitude = f.clamp(-180.0, 180.0) },
+                _ => {}
+            }
+        }
+        Ok(c)
     }
 
     pub fn read_from(path: &Path) -> io::Result<Config> {
@@ -113,7 +138,7 @@ impl Config {
 
     pub fn to_text(&self) -> String {
         format!(
-            "# MiniTools AutoDark 配置\n\
+            "# 一呼 AutoDark 配置\n\
              enabled = {}\n\
              mode = {}\n\
              light_time = {:02}:{:02}\n\
@@ -135,11 +160,7 @@ impl Config {
     }
 
     pub fn save(&self) -> io::Result<()> {
-        let p = Self::config_path();
-        if let Some(dir) = p.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        fs::write(p, self.to_text())
+        paths::write_current("autodark.conf", &self.to_text())
     }
 }
 

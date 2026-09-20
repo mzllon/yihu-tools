@@ -16,7 +16,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mt_core::panel;
+use yihu_core::panel;
 
 use crate::shell_ext;
 use crate::{page_shell, scroll_clamp};
@@ -364,7 +364,7 @@ impl Ui {
 
     fn refresh(&self) {
         // 面板进程资源
-        self.panel_res.set_text(&match mt_core::find_process_stats("yihu-panel") {
+        self.panel_res.set_text(&match yihu_core::find_process_stats("yihu-panel") {
             Some((rss, pss)) => format!(
                 "运行中 · RSS {:.0} MB · 实际 {:.0} MB",
                 mb(rss),

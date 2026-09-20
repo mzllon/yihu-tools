@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
+use crate::paths;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_HOTKEY: &str = "<Alt>space";
@@ -41,17 +42,30 @@ impl Default for Config {
 
 impl Config {
     pub fn config_path() -> PathBuf {
-        let home = std::env::var("XDG_CONFIG_HOME").ok().filter(|v| !v.is_empty());
-        let base = match home {
-            Some(h) => PathBuf::from(h),
-            None => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
-                .join(".config"),
-        };
-        base.join("minitools/panel.conf")
+        paths::config_file("panel.conf")
     }
 
     pub fn load() -> Config {
-        Self::read_from(&Self::config_path()).unwrap_or_default()
+        let result = paths::read_compatible("panel.conf")
+            .ok()
+            .and_then(|text| Self::read_from_text(&text).ok())
+            .unwrap_or_default();
+        let _ = paths::migrate_one("panel.conf");
+        result
+    }
+
+    fn read_from_text(text: &str) -> io::Result<Config> {
+        let mut c = Config::default();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            let Some((k, v)) = line.split_once('=') else { continue };
+            match (k.trim(), v.trim()) {
+                ("hotkey", v) if !v.is_empty() => c.hotkey = v.to_string(),
+                ("place_offset_up", v) => if let Ok(n) = v.parse::<i32>() { c.place_offset_up = n },
+                _ => {}
+            }
+        }
+        Ok(c)
     }
 
     pub fn read_from(path: &Path) -> io::Result<Config> {
@@ -83,11 +97,7 @@ impl Config {
     }
 
     pub fn save(&self) -> io::Result<()> {
-        let p = Self::config_path();
-        if let Some(dir) = p.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        fs::write(p, self.to_text())
+        paths::write_current("panel.conf", &self.to_text())
     }
 }
 
@@ -242,28 +252,23 @@ pub struct History {
 
 impl History {
     pub fn path() -> PathBuf {
-        let home = std::env::var("XDG_CONFIG_HOME").ok().filter(|v| !v.is_empty());
-        let base = match home {
-            Some(h) => PathBuf::from(h),
-            None => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
-                .join(".config"),
-        };
-        base.join("minitools/panel_history.json")
+        paths::config_file("panel_history.json")
     }
 
     pub fn load() -> History {
-        fs::read_to_string(Self::path())
+        let result = paths::read_compatible("panel_history.json")
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let _ = paths::migrate_one("panel_history.json");
+        result
     }
 
     pub fn save(&self) -> io::Result<()> {
-        let p = Self::path();
-        if let Some(dir) = p.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        fs::write(p, serde_json::to_string(self).unwrap_or_default())
+        paths::write_current(
+            "panel_history.json",
+            &serde_json::to_string(self).unwrap_or_default(),
+        )
     }
 
     /// 记一次使用（存在则累加并刷新时间，不存在则新增）。

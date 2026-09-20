@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/mt-core", "tools/yihu", "tools/autodark-agent", "tools/yihu-panel", "plugins/ts-convert"]
+members = ["crates/yihu-core", "tools/yihu", "tools/autodark-agent", "tools/yihu-panel", "plugins/ts-convert"]
+exclude = ["tools/sysdash"]
 
 [workspace.package]
 version = "0.1.0"

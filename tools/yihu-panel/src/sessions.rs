@@ -12,7 +12,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use mt_core::plugins;
+use yihu_core::plugins;
 
 use crate::app::PanelEntry;
 
@@ -65,7 +65,7 @@ impl PluginMgr {
     /// 崩溃超限的插件本次运行期跳过；持久禁用走中心「插件」页。
     pub fn ensure_sessions(&mut self) {
         let debug = std::env::var_os("YIHU_PANEL_DEBUG").is_some();
-        let state = mt_core::plugins::PluginsState::load();
+        let state = yihu_core::plugins::PluginsState::load();
         let (installed, errors) = plugins::list_installed();
         if debug {
             eprintln!(

@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mt_core::plugins;
+use yihu_core::plugins;
 
 use crate::{page_shell, scroll_clamp};
 

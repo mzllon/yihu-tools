@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MiniTools：Nautilus 右键脚本 —— 复制选中项的绝对路径
+# 一呼：Nautilus 右键脚本 —— 复制选中项的绝对路径
 # 安装位置：~/.local/share/nautilus/scripts/复制绝对路径
 #
 # 剪贴板策略：GNOME Wayland 下剪贴板属主必须走 data-control 协议，

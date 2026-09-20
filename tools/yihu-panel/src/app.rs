@@ -40,7 +40,7 @@ struct Deps {
     app: gtk::Application,
     plugins: Rc<RefCell<PluginMgr>>,
     visible: Arc<AtomicBool>,
-    history: Rc<RefCell<mt_core::panel::History>>,
+    history: Rc<RefCell<yihu_core::panel::History>>,
     center: PathBuf,
     entries: Rc<RefCell<Vec<PanelEntry>>>,
     nuc: Rc<RefCell<nucleo::Nucleo<PanelEntry>>>,
@@ -89,7 +89,7 @@ pub fn run_daemon() {
         std::mem::forget(app.hold());
         load_css();
 
-        let history = Rc::new(RefCell::new(mt_core::panel::History::load()));
+        let history = Rc::new(RefCell::new(yihu_core::panel::History::load()));
         let caps = providers::BuiltinProvider::capabilities();
         let apps = collect_apps();
         // 条目全集 = 内置能力 + 应用（供默认集「最近」回查）；nucleo 只匹配应用
@@ -206,7 +206,7 @@ fn summon(deps: &Rc<Deps>, slot: &Slot) {
     entry.grab_focus();
     // 请求 Shell 扩展把面板摆到上部居中并按配置上移（未装扩展时静默忽略），
     // 摆放完成后窗口淡入，定位前的竞争窗口期对用户不可见
-    let offset = mt_core::panel::Config::load().place_offset_up;
+    let offset = yihu_core::panel::Config::load().place_offset_up;
     crate::service::call_placer(offset);
     {
         let w = win.clone();
@@ -662,7 +662,7 @@ fn header_row(t: &str) -> PanelEntry {
 
 /// 最近使用条目：历史按时间排序后映射回条目（应用/能力），取前 n 个。
 fn recent_entries(
-    history: &mt_core::panel::History,
+    history: &yihu_core::panel::History,
     entries: &[PanelEntry],
     n: usize,
 ) -> Vec<PanelEntry> {
@@ -681,7 +681,7 @@ fn recent_entries(
 
 /// 空输入时的分组默认集：最近（胶囊，应用+能力按时间，最多 4 个）→
 /// 快捷能力（胶囊 5 个）。全部为点击即触发的按钮，无普通行。
-fn default_rows(history: &mt_core::panel::History, entries: &[PanelEntry]) -> Vec<PanelEntry> {
+fn default_rows(history: &yihu_core::panel::History, entries: &[PanelEntry]) -> Vec<PanelEntry> {
     let mut rows = Vec::new();
 
     let recent = recent_entries(history, entries, 3);
@@ -846,7 +846,7 @@ fn sibling(name: &str) -> PathBuf {
 }
 
 /// 历史记一次并在后台线程落盘（激活路径不做文件 IO）。
-fn record(history: &Rc<RefCell<mt_core::panel::History>>, id: &str) {
+fn record(history: &Rc<RefCell<yihu_core::panel::History>>, id: &str) {
     let snapshot = {
         let mut h = history.borrow_mut();
         h.bump(id);

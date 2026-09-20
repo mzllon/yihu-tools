@@ -1,10 +1,10 @@
 [package]
 name = "sysdash"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
 description = "一呼 · 系统仪表盘（GTK4 原生）"
 
 [dependencies]
-mt-core = { path = "../../crates/mt-core" }
+yihu-core = { path = "../../crates/yihu-core" }
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
 adw = { package = "libadwaita", version = "0.7", features = ["v1_4"] }
