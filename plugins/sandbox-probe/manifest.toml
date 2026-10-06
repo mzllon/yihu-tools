@@ -1,0 +1,11 @@
+id = "sandbox-probe"
+name = "沙箱探针"
+version = "0.1.0"
+api = "^1"
+entry = "probe.py"
+icon = "security-high-symbolic"
+
+[[triggers]]
+keywords = ["probe", "探针", "沙箱"]
+
+permissions = []

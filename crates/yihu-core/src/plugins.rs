@@ -95,6 +95,37 @@ pub fn plugins_dir() -> PathBuf {
     data_home().join("yihu/plugins")
 }
 
+/// 插件运行时数据目录：M4 起插件目录只读，这里是每个插件唯一可写位置。
+/// 与注册表分离，避免「运行时写入」和「安装物完整性」互相污染。
+pub fn plugin_data_dir(id: &str) -> PathBuf {
+    data_home().join("yihu/plugin-data").join(id)
+}
+
+/// 确保 id 对应的数据目录存在（权限 0700，仅属主可访问）。幂等。
+pub fn ensure_plugin_data_dir(id: &str) -> io::Result<PathBuf> {
+    ensure_plugin_data_dir_in(&data_home(), id)
+}
+
+/// 同上，以 base 作为数据根（测试注入用，避免写真实用户目录）。
+pub fn ensure_plugin_data_dir_in(base: &Path, id: &str) -> io::Result<PathBuf> {
+    // id 已在 manifest 解析时校验过字符集；这里防御性重复检查，
+    // 保证拼接结果不可能逃出 base（与 install/remove 的 id 语义一致）
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("id 非法（须为小写字母/数字/-）：{id:?}"),
+        ));
+    }
+    let dir = base.join("yihu/plugin-data").join(id);
+    fs::create_dir_all(&dir)?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    Ok(dir)
+}
+
 /// 插件启停状态文件
 pub fn state_path() -> PathBuf {
     crate::paths::config_file("plugins_state.json")
@@ -341,5 +372,36 @@ entry = "x"
         let text = serde_json::to_string(&st).unwrap();
         let back: PluginsState = serde_json::from_str(&text).unwrap();
         assert!(back.is_disabled("a") && !back.is_disabled("b"));
+    }
+
+    #[test]
+    fn data_dir_path_layout() {
+        let p = plugin_data_dir("passgen");
+        assert!(p.ends_with("yihu/plugin-data/passgen"));
+    }
+
+    #[test]
+    fn ensure_data_dir_creates_0700_idempotent() {
+        let base = std::env::temp_dir().join(format!("yihu-core-test-{}", std::process::id()));
+        let dir = ensure_plugin_data_dir_in(&base, "probe").unwrap();
+        assert!(dir.is_dir());
+        let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        // 幂等：重复调用不报错且权限保持 0700
+        let again = ensure_plugin_data_dir_in(&base, "probe").unwrap();
+        assert_eq!(again, dir);
+        let mode2 = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode2, 0o700);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn ensure_data_dir_rejects_bad_id() {
+        let base = std::env::temp_dir().join(format!("yihu-core-test-{}", std::process::id()));
+        for bad in ["", "../escape", "A/B", "大写"] {
+            assert!(ensure_plugin_data_dir_in(&base, bad).is_err(), "{bad:?}");
+        }
+        // 非法 id 不得在磁盘上留下任何目录
+        assert!(!base.join("yihu").exists());
     }
 }

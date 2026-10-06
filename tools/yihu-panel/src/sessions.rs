@@ -4,11 +4,15 @@
 //! 每次 keystroke 向各会话广播 query（行式 JSON）；
 //! 面板收起（hide）时对进程组 SIGKILL 整组杀灭 → 待命零进程零内存。
 //! 插件连续退出（5 分钟内 4 次）则本会话禁用，避免反复崩溃刷屏。
+//!
+//! M4 起 spawn 统一走 sandbox::command（bwrap 白名单，fail-closed）；
+//! 主循环回调里仍禁止任何无界阻塞（BUG-001 教训）——wait() 仅在
+//! 「读线程已见 EOF / kill_all 同约定」的有界路径上调用。
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -70,8 +74,16 @@ impl PluginMgr {
 
     /// 呼出时调用：确保全部启用插件的会话存活（幂等）。
     /// 崩溃超限的插件本次运行期跳过；持久禁用走中心「插件」页。
+    /// M4 起插件统一经 bwrap 沙箱拉起（fail-closed：沙箱不可用则不拉起，
+    /// 见 sandbox 模块与 docs/插件基座安全模型与发布策略.md）。
     pub fn ensure_sessions(&mut self) {
         let debug = std::env::var_os("YIHU_PANEL_DEBUG").is_some();
+        if !crate::sandbox::available() {
+            eprintln!(
+                "yihu-panel: bwrap 不可用，插件沙箱无法建立，本次运行期不拉起任何插件（fail-closed）"
+            );
+            return;
+        }
         let state = yihu_core::plugins::PluginsState::load();
         let (installed, errors) = plugins::list_installed();
         if debug {
@@ -98,7 +110,7 @@ impl PluginMgr {
                 self.disabled_by_failures.insert(id);
                 continue;
             }
-            match self.spawn_session(&inst) {
+            match self.spawn_session(&inst, debug) {
                 Ok(sess) => {
                     if debug {
                         eprintln!("yihu-panel: 已拉起插件会话 {id}");
@@ -113,21 +125,26 @@ impl PluginMgr {
         }
     }
 
-    fn spawn_session(&mut self, inst: &plugins::Installed) -> io::Result<Session> {
+    fn spawn_session(&mut self, inst: &plugins::Installed, debug: bool) -> io::Result<Session> {
         let id = inst.manifest.id.clone();
         self.gen += 1;
         let gen = self.gen;
-        let entry = inst.entry_path();
-        let mut child = Command::new(&entry)
-            .current_dir(&inst.dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0) // 组级杀灭，不留孤儿
-            .spawn()?;
+        // 唯一可写数据目录（0700）；插件目录经 bwrap 只读挂载，运行期写入
+        // 全部落在此处，宿主真实路径不进沙箱（init 只给虚拟路径 /data）
+        plugins::ensure_plugin_data_dir(&id)?;
+        let mut child = crate::sandbox::command(
+            &inst.manifest.entry,
+            &inst.dir,
+            &plugins::plugin_data_dir(&id),
+        )?
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(if debug { Stdio::inherit() } else { Stdio::null() })
+        .process_group(0) // 组级杀灭，不留孤儿（杀的是 bwrap 进程组）
+        .spawn()?;
         let mut stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
-        let data_dir = inst.dir.display().to_string();
+        let data_dir = crate::sandbox::SANDBOX_DATA_DIR;
         writeln!(
             stdin,
             "{{\"type\":\"init\",\"api\":1,\"data_dir\":{}}}",

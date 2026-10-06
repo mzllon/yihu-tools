@@ -7,6 +7,7 @@
 mod app;
 mod calc;
 mod providers;
+mod sandbox;
 mod sessions;
 mod service;
 

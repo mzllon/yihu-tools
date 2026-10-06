@@ -19,4 +19,9 @@ mkdir -p "$REG/passgen"
 install -m755 "$ROOT/plugins/passgen/passgen.py" "$REG/passgen/passgen.py"
 install -m644 "$ROOT/plugins/passgen/manifest.toml" "$REG/passgen/manifest.toml"
 
-echo "已安装示例插件：ts-convert、passgen（$REG）"
+# 沙箱探针：验证 bwrap 白名单边界（M4 安全收口）
+mkdir -p "$REG/sandbox-probe"
+install -m755 "$ROOT/plugins/sandbox-probe/probe.py" "$REG/sandbox-probe/probe.py"
+install -m644 "$ROOT/plugins/sandbox-probe/manifest.toml" "$REG/sandbox-probe/manifest.toml"
+
+echo "已安装示例插件：ts-convert、passgen、sandbox-probe（$REG）"
