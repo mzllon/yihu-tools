@@ -1,0 +1,15 @@
+[package]
+name = "uic-poc"
+version.workspace = true
+edition.workspace = true
+description = "UI 插件形态 PoC：受控 webkit 按需进程 vs 原生模板实测脚手架"
+
+[features]
+# web 腿需要系统库 libwebkitgtk-6.0-dev（GTK4 版 WebKitGTK，Ubuntu:
+# sudo apt install libwebkitgtk-6.0-dev），装好后 cargo build -p uic-poc --features web
+default = []
+web = ["dep:webkit6"]
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+webkit6 = { version = "~0.4", optional = true }

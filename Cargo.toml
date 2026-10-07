@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/yihu-core", "tools/yihu", "tools/autodark-agent", "tools/yihu-panel", "plugins/ts-convert"]
+members = ["crates/yihu-core", "tools/yihu", "tools/autodark-agent", "tools/yihu-panel", "tools/uic-poc", "plugins/ts-convert"]
 exclude = ["tools/sysdash"]
 
 [workspace.package]
