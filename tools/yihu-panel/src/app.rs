@@ -149,6 +149,19 @@ pub fn run_daemon() {
                         Cmd::Show => summon(&deps, &slot),
                         Cmd::Hide => hide_panel(&deps, &slot),
                         Cmd::Quit => quit = true,
+                        Cmd::SelectFiles(files) => {
+                            // 选中文件上下文（显式用户动作注入）；净化后
+                            // 存入会话管理器，query 按权限转发
+                            let clean: Vec<String> = files
+                                .into_iter()
+                                .filter(|f| !f.is_empty() && f.len() <= 4096)
+                                .take(64)
+                                .collect();
+                            if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
+                                eprintln!("yihu-panel: 上下文选中 {} 项", clean.len());
+                            }
+                            deps.plugins.borrow_mut().set_context_files(clean);
+                        }
                         Cmd::FadeIn(gen) => {
                             if deps.gen.get() != gen {
                                 continue; // 上一代呼出的迟到淡入，丢弃

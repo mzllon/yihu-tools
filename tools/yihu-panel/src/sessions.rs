@@ -68,6 +68,9 @@ pub struct PluginMgr {
     current_query: Option<(String, u64)>,
     /// 各插件对当前查询的最新结果（query_id, rows）；未超期的旧结果保留，避免闪烁
     latest: HashMap<String, (u64, Vec<PanelEntry>)>,
+    /// 选中文件上下文（SelectFiles 注入，收起即清）；query 时按
+    /// manifest 权限（selected_files.read）转发给对应会话
+    context_files: Vec<String>,
 }
 
 impl PluginMgr {
@@ -83,6 +86,7 @@ impl PluginMgr {
             gen: 0,
             current_query: None,
             latest: HashMap::new(),
+            context_files: Vec::new(),
         }
     }
 
@@ -214,7 +218,13 @@ impl PluginMgr {
         self.send_all_to(plugin, &line);
     }
 
+    /// 注入选中文件上下文（app.rs 已净化：≤64 项、单项 ≤4KiB）
+    pub fn set_context_files(&mut self, files: Vec<String>) {
+        self.context_files = files;
+    }
+
     /// 每次 keystroke：向全部会话广播查询。空文本清空插件结果。
+    /// 声明了 selected_files.read 的会话额外携带 context.files。
     pub fn broadcast(&mut self, text: &str) {
         if text.is_empty() {
             self.latest.clear();
@@ -224,11 +234,40 @@ impl PluginMgr {
         self.query_seq += 1;
         let id = self.query_seq;
         self.current_query = Some((text.to_string(), id));
-        let line = format!(
-            "{{\"type\":\"query\",\"id\":{id},\"text\":{}}}",
-            serde_json::to_string(text).expect("文本是合法 JSON 字符串")
-        );
-        self.send_all(&line);
+        let text_json = serde_json::to_string(text).expect("文本是合法 JSON 字符串");
+        let files_json = if self.context_files.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&self.context_files)
+                    .expect("路径列表是合法 JSON"),
+            )
+        };
+        let dead: Vec<String> = self
+            .sessions
+            .iter_mut()
+            .filter_map(|s| {
+                let line = match (
+                    &files_json,
+                    s.permissions
+                        .contains(yihu_core::permissions::SELECTED_FILES_READ),
+                ) {
+                    (Some(f), true) => format!(
+                        "{{\"type\":\"query\",\"id\":{id},\"text\":{text_json},\"context\":{{\"files\":{f}}}}}"
+                    ),
+                    _ => format!("{{\"type\":\"query\",\"id\":{id},\"text\":{text_json}}}"),
+                };
+                (s.stdin.write_all(line.as_bytes()).is_err()
+                    || s.stdin.write_all(b"\n").is_err()
+                    || s.stdin.flush().is_err())
+                .then(|| s.id.clone())
+            })
+            .collect();
+        for id in dead {
+            self.record_failure(&id);
+            self.sessions.retain(|s| s.id != id);
+            self.latest.remove(&id);
+        }
     }
 
     /// 收起时调用：进程组级 SIGKILL，整组杀灭。
@@ -242,6 +281,7 @@ impl PluginMgr {
         self.sessions.clear();
         self.latest.clear();
         self.current_query = None;
+        self.context_files.clear(); // 选中文件上下文一次性：收起即失效
     }
 
     /// 主循环 tick 调用：处理结果/退出/能力请求事件。
@@ -329,24 +369,6 @@ impl PluginMgr {
             {
                 return;
             }
-        }
-    }
-
-    fn send_all(&mut self, line: &str) {
-        let dead: Vec<String> = self
-            .sessions
-            .iter_mut()
-            .filter_map(|s| {
-                (s.stdin.write_all(line.as_bytes()).is_err()
-                    || s.stdin.write_all(b"\n").is_err()
-                    || s.stdin.flush().is_err())
-                .then(|| s.id.clone())
-            })
-            .collect();
-        for id in dead {
-            self.record_failure(&id);
-            self.sessions.retain(|s| s.id != id);
-            self.latest.remove(&id);
         }
     }
 
@@ -486,8 +508,14 @@ for line in sys.stdin:
     if t == "init":
         send({"type": "ready"})
     elif t == "query":
+        text = m["text"]
+        if text == "files":
+            n = len(m.get("context", {}).get("files", []))
+            send({"type": "results", "query_id": m["id"],
+                  "items": [{"title": f"files:{n}", "payload": "p"}]})
+            continue
         rid = 1000 + m["id"]
-        cap = "clipboard.write" if m["text"] != "notify" else "notify"
+        cap = "clipboard.write" if text != "notify" else "notify"
         send({"type": "capability_request", "id": rid, "capability": cap,
               "params": {"text": "hello", "summary": "s"}})
         pending[rid] = m["id"]
@@ -510,19 +538,29 @@ for line in sys.stdin:
             .unwrap_or(false)
     }
 
+    /// fake-plugin：声明 clipboard.write + selected_files.read；
+    /// plain-plugin：零权限（验证 context 门控与能力拒绝）
     fn make_registry(base: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
-        let dir = base.join("fake-plugin");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("manifest.toml"),
-            "id = \"fake-plugin\"\nname = \"假插件\"\napi = \"^1\"\nentry = \"plugin.py\"\npermissions = [\"clipboard.write\"]\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("plugin.py"), FAKE_PY).unwrap();
-        // 与 install_from_dir 语义一致：入口必须可执行（bwrap 直接 execvp）
-        std::fs::set_permissions(dir.join("plugin.py"), std::fs::Permissions::from_mode(0o755))
+        for (id, name, perms) in [
+            ("fake-plugin", "假插件", "[\"clipboard.write\", \"selected_files.read\"]"),
+            ("plain-plugin", "素插件", "[]"),
+        ] {
+            let dir = base.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("manifest.toml"),
+                format!("id = \"{id}\"\nname = \"{name}\"\napi = \"^1\"\nentry = \"plugin.py\"\npermissions = {perms}\n"),
+            )
             .unwrap();
+            std::fs::write(dir.join("plugin.py"), FAKE_PY).unwrap();
+            // 与 install_from_dir 语义一致：入口必须可执行（bwrap 直接 execvp）
+            std::fs::set_permissions(
+                dir.join("plugin.py"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
     }
 
     /// 反复 drain 直到条件满足（超时 panic）。注意 latest 保留旧查询的
@@ -579,12 +617,22 @@ for line in sys.stdin:
             m.latest_rows().iter().any(|r| r.title == "granted")
         });
 
-        // ③ 权限表可查且与 manifest 一致
-        let perms = mgr.permissions_of("fake-plugin").unwrap();
-        assert!(perms.contains("clipboard.write"));
-        assert!(!perms.contains("notify"));
-
+        // ③ context 门控：声明 selected_files.read 的会话拿到文件，零权限
+        //    会话拿到空 context（两条结果并存可对照）
+        mgr.set_context_files(vec!["/tmp/a.txt".into(), "/tmp/b.txt".into()]);
+        mgr.broadcast("files");
+        wait_for(&mut mgr, Duration::from_secs(10), |m, _| {
+            let titles: Vec<String> = m.latest_rows().iter().map(|r| r.title.clone()).collect();
+            titles.contains(&"files:2".to_string()) && titles.contains(&"files:0".to_string())
+        });
+        // 收起即清：kill_all 后再注入并广播，无会话应答（不给等待窗口）
         mgr.kill_all();
+        mgr.set_context_files(vec!["/tmp/a.txt".into()]);
+        mgr.broadcast("files");
+        assert!(mgr.latest_rows().is_empty(), "会话已收起，不应有结果");
+
+        // ④ 无残余会话
+        assert!(mgr.permissions_of("fake-plugin").is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -16,7 +16,7 @@ use zbus::interface;
 pub const BUS_NAME: &str = "tools.yihu.Panel";
 pub const OBJ_PATH: &str = "/tools/yihu/Panel";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Cmd {
     Toggle,
     Show,
@@ -25,6 +25,9 @@ pub enum Cmd {
     /// 定位线程确认「窗口已配置尺寸且完成映射后摆放」后触发淡入；
     /// gen 为呼出代数，防止迟到的淡入作用于新一代窗口
     FadeIn(u64),
+    /// 选中文件上下文（Nautilus 扩展 / CLI 注入，二期 files 触发）。
+    /// 只经显式用户动作进入面板；能力代理按 manifest 权限转发给插件。
+    SelectFiles(Vec<String>),
 }
 
 pub struct PanelService {
@@ -45,6 +48,9 @@ impl PanelService {
     }
     fn quit(&self) {
         let _ = self.tx.lock().unwrap().send(Cmd::Quit);
+    }
+    fn select_files(&self, uris: Vec<String>) {
+        let _ = self.tx.lock().unwrap().send(Cmd::SelectFiles(uris));
     }
     #[zbus(property)]
     fn visible(&self) -> bool {
@@ -79,6 +85,9 @@ fn call(conn: &zbus::blocking::Connection, cmd: Cmd) -> zbus::Result<()> {
         Cmd::Show => { let _: () = proxy.call("Show", &())?; }
         Cmd::Hide => { let _: () = proxy.call("Hide", &())?; }
         Cmd::Quit => { let _: () = proxy.call("Quit", &())?; }
+        Cmd::SelectFiles(uris) => {
+            let _: () = proxy.call("SelectFiles", &(&uris,))?;
+        }
         // FadeIn 是定位线程回传守护进程的内部命令，CLI 不会发送
         Cmd::FadeIn(_) => {}
     }

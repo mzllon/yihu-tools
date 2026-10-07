@@ -26,8 +26,23 @@ fn main() {
         Some("hide") => std::process::exit(service::run_cli(service::Cmd::Hide)),
         Some("quit") => std::process::exit(service::run_cli(service::Cmd::Quit)),
         Some("status") => std::process::exit(service::run_status()),
+        // files <路径>…：注入选中文件上下文并呼出面板（files 触发，二期）
+        Some("files") => {
+            let paths: Vec<String> = std::env::args().skip(2).collect();
+            if paths.is_empty() {
+                eprintln!("用法: yihu-panel files <路径>…");
+                std::process::exit(2);
+            }
+            let code = service::run_cli(service::Cmd::SelectFiles(paths));
+            if code == 0 {
+                std::process::exit(service::run_cli(service::Cmd::Toggle));
+            }
+            std::process::exit(code);
+        }
         Some(other) => {
-            eprintln!("未知子命令 {other:?}\n用法: yihu-panel [toggle|show|hide|quit|status]");
+            eprintln!(
+                "未知子命令 {other:?}\n用法: yihu-panel [toggle|show|hide|quit|status|files <路径>…]"
+            );
             std::process::exit(2);
         }
     }
