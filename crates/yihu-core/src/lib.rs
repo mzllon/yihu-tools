@@ -7,6 +7,7 @@
 pub mod autodark;
 pub mod panel;
 pub mod paths;
+pub mod permissions;
 pub mod plugins;
 pub mod sun;
 

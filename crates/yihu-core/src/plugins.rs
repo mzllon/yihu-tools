@@ -46,7 +46,7 @@ pub struct Manifest {
 /// 解析并校验 manifest。校验项：id/name/entry 非空、id 字符集、
 /// api range 与宿主协议主版本匹配。
 pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
-    let m: Manifest = toml::from_str(text).map_err(|e| format!("manifest 解析失败：{e}"))?;
+    let mut m: Manifest = toml::from_str(text).map_err(|e| format!("manifest 解析失败：{e}"))?;
     if m.id.is_empty() || !m.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return Err(format!("id 非法（须为小写字母/数字/-）：{:?}", m.id));
     }
@@ -62,6 +62,11 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
             m.api
         ));
     }
+    // M4 权限声明 v1：严格白名单，未知名 = 拒装（见 permissions 模块说明）
+    let permissions = crate::permissions::validate(&m.permissions).map_err(|e| {
+        format!("插件 {} 权限声明非法：{e}", m.id)
+    })?;
+    m.permissions = permissions;
     Ok(m)
 }
 
@@ -350,6 +355,26 @@ entry = "x"
     }
 
     #[test]
+    fn manifest_rejects_unknown_permission() {
+        let bad = r#"id = "a"
+name = "x"
+api = "^1"
+entry = "x"
+permissions = ["clipboard.write", "make.coffee"]
+"#;
+        let e = parse_manifest(bad).unwrap_err();
+        assert!(e.contains("make.coffee"), "{e}");
+        let good = r#"id = "a"
+name = "x"
+api = "^1"
+entry = "x"
+permissions = ["clipboard.write", "open_uri"]
+"#;
+        let m = parse_manifest(good).unwrap();
+        assert_eq!(m.permissions, vec!["clipboard.write", "open_uri"]);
+    }
+
+    #[test]
     fn api_range_matching() {
         assert!(api_matches("^1", 1));
         assert!(api_matches("1", 1));
@@ -380,9 +405,14 @@ entry = "x"
         assert!(p.ends_with("yihu/plugin-data/passgen"));
     }
 
+    /// 并行测试各自独立临时目录（同 pid 同路径会在测试间互相看到残留）
+    fn test_base(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("yihu-core-test-{}-{tag}", std::process::id()))
+    }
+
     #[test]
     fn ensure_data_dir_creates_0700_idempotent() {
-        let base = std::env::temp_dir().join(format!("yihu-core-test-{}", std::process::id()));
+        let base = test_base("creates");
         let dir = ensure_plugin_data_dir_in(&base, "probe").unwrap();
         assert!(dir.is_dir());
         let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
@@ -397,7 +427,7 @@ entry = "x"
 
     #[test]
     fn ensure_data_dir_rejects_bad_id() {
-        let base = std::env::temp_dir().join(format!("yihu-core-test-{}", std::process::id()));
+        let base = test_base("rejects");
         for bad in ["", "../escape", "A/B", "大写"] {
             assert!(ensure_plugin_data_dir_in(&base, bad).is_err(), "{bad:?}");
         }

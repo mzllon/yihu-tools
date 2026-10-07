@@ -34,8 +34,8 @@ pub fn build_page() -> gtk::Widget {
     for line in [
         "插件是带 manifest.toml 的独立程序：呼出面板把搜索词交给它，",
         "把结果并入候选列表；面板收起时插件进程随即结束，不占资源。",
-        "v0 权限为声明 + 明示（安装时与权限列可见）；进程隔离与白名单",
-        "沙箱兜底已内建，强制隔离列入 M4。",
+        "M4 起宿主强制安全：插件经 bwrap 沙箱拉起（白名单外访问失败、",
+        "fail-closed），系统能力须经宿主代理并受 manifest 权限约束。",
     ] {
         let l = Label::new(Some(line));
         l.add_css_class("dim-label");
@@ -188,7 +188,15 @@ impl Ui {
             let perms = if inst.manifest.permissions.is_empty() {
                 "权限：无".to_string()
             } else {
-                format!("权限：{}", inst.manifest.permissions.join("、"))
+                format!(
+                    "权限：{}",
+                    inst.manifest
+                        .permissions
+                        .iter()
+                        .map(|p| format!("{p}（{}）", yihu_core::permissions::label(p)))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                )
             };
             let sub = Label::new(Some(&format!("{perms} · 入口 {}", inst.manifest.entry)));
             sub.add_css_class("caption-sm");
