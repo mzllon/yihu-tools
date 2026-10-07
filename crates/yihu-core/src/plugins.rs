@@ -84,7 +84,9 @@ pub fn api_matches(range: &str, host_major: u32) -> bool {
 
 // ---- 注册表路径 ----
 
-fn data_home() -> PathBuf {
+/// 用户数据根（XDG_DATA_HOME 或 ~/.local/share）；审计、收据等宿主
+/// owned 数据以它为根，公开给 audit 等模块复用同一套解析。
+pub fn data_home() -> PathBuf {
     std::env::var("XDG_DATA_HOME")
         .ok()
         .filter(|v| v.starts_with('/'))
@@ -103,7 +105,12 @@ pub fn plugins_dir() -> PathBuf {
 /// 插件运行时数据目录：M4 起插件目录只读，这里是每个插件唯一可写位置。
 /// 与注册表分离，避免「运行时写入」和「安装物完整性」互相污染。
 pub fn plugin_data_dir(id: &str) -> PathBuf {
-    data_home().join("yihu/plugin-data").join(id)
+    plugin_data_dir_in(&data_home(), id)
+}
+
+/// 同上，以 base 作为数据根（测试注入用）。
+pub fn plugin_data_dir_in(base: &Path, id: &str) -> PathBuf {
+    base.join("yihu/plugin-data").join(id)
 }
 
 /// 确保 id 对应的数据目录存在（权限 0700，仅属主可访问）。幂等。

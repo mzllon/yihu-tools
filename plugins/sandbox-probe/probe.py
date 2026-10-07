@@ -15,6 +15,11 @@ import sys
 
 OK, BAD = "✅", "❌"
 
+# 已发出的能力请求：request_id → (query_id, 预期结果)
+#   expect="grant" —— 已声明能力（clipboard.write），宿主应授权
+#   expect="deny"  —— 未声明能力（notify），宿主应拒绝
+pending = {}
+
 
 def check(name, should, run):
     """执行一项检查：run() 返回 (预期成立?, 详情)。永不抛出。"""
@@ -45,18 +50,40 @@ def main() -> None:
             out.write(json.dumps({"type": "ready"}) + "\n")
             out.flush()
         elif msg.get("type") == "query":
-            items = [
-                check("读插件目录（应可读）", "allow", lambda: _readable("/plugin/manifest.toml")),
-                check("写插件目录（应被拒）", "deny", _write_plugin_dir),
-                check("写数据目录（应可写）", "allow", _write_data_dir),
-                check("读宿主家目录（应不可见）", "deny", lambda: _listable("/home")),
-                check("读 /etc/shadow（应不可见）", "deny", lambda: _readable("/etc/shadow")),
-                check("联网（应被隔离）", "deny", _net),
-                check("连宿主 D-Bus（应被隔离）", "deny", _dbus),
-            ]
+            text = msg.get("text", "")
+            qid = msg.get("id", 0)
+            if text.startswith("copy:"):
+                # 已声明能力：宿主应授权并真实写入剪贴板
+                _request(out, qid, "clipboard.write", {"text": text[5:]}, "grant",
+                         "宿主写剪贴板（已声明）")
+            elif text.startswith("notify:"):
+                # 未声明能力：宿主应拒绝（manifest 只声明 clipboard.write）
+                _request(out, qid, "notify", {"summary": "探针越权"}, "deny",
+                         "桌面通知（未声明）")
+            else:
+                _checklist(out, qid)
+        elif msg.get("type") == "capability_response":
+            req = pending.pop(msg.get("id"), None)
+            if req is None:
+                continue
+            qid, expect, name = req
+            ok = bool(msg.get("ok"))
+            if expect == "grant":
+                good, detail = ok, (msg.get("error") or "已由宿主执行")
+                if ok:
+                    detail = "宿主已执行（剪贴板可粘贴验证）"
+            else:
+                good = not ok
+                detail = msg.get("error") or "被宿主拒绝"
+                if not ok:
+                    detail = f"宿主拒绝：{detail}"
+            title = f"{OK if good else BAD} 能力代理：{name}"
             out.write(
                 json.dumps(
-                    {"type": "results", "query_id": msg.get("id", 0), "items": items},
+                    {"type": "results", "query_id": qid,
+                     "items": [{"title": title, "subtitle": detail[:120],
+                                "icon": "security-high-symbolic" if good else "dialog-error-symbolic",
+                                "payload": f"{name}｜{detail}"}]},
                     ensure_ascii=False,
                 )
                 + "\n"
@@ -64,6 +91,51 @@ def main() -> None:
             out.flush()
         elif msg.get("type") == "activate":
             pass  # v0 激活由宿主完成（复制 payload）
+
+
+def _request(out, qid, capability, params, expect, name):
+    """发起能力请求；结果在 capability_response 回来后给出。"""
+    rid = 9000 + len(pending) + 1
+    while rid in pending:
+        rid += 1
+    pending[rid] = (qid, expect, name)
+    out.write(
+        json.dumps({"type": "capability_request", "id": rid,
+                    "capability": capability, "params": params},
+                   ensure_ascii=False)
+        + "\n"
+    )
+    out.flush()
+
+
+def _checklist(out, qid):
+    items = [
+        check("读插件目录（应可读）", "allow", lambda: _readable("/plugin/manifest.toml")),
+        check("写插件目录（应被拒）", "deny", _write_plugin_dir),
+        check("写数据目录（应可写）", "allow", _write_data_dir),
+        check("读宿主家目录（应不可见）", "deny", lambda: _listable("/home")),
+        check("读 /etc/shadow（应不可见）", "deny", lambda: _readable("/etc/shadow")),
+        check("联网（应被隔离）", "deny", _net),
+        check("连宿主 D-Bus（应被隔离）", "deny", _dbus),
+        check("直接写剪贴板 xclip（应失败）", "deny", _xclip),
+    ]
+    out.write(
+        json.dumps(
+            {"type": "results", "query_id": qid, "items": items},
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+    out.flush()
+
+
+def _xclip():
+    import subprocess
+    r = subprocess.run(["xclip", "-selection", "clipboard"], input=b"x",
+                       capture_output=True, timeout=3)
+    if r.returncode == 0:
+        return False, "xclip 写剪贴板成功——能力代理被绕过！"
+    return True, "无 xclip/无显示服务，绕过路径不可用"
 
 
 def _readable(path):

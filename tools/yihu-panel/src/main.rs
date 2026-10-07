@@ -5,6 +5,7 @@
 //! 性能底线：窗口与演示数据启动时建好、隐藏待命，呼出路径零 IO。
 
 mod app;
+mod caps;
 mod calc;
 mod providers;
 mod sandbox;

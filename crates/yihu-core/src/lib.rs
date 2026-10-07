@@ -4,6 +4,7 @@
 //! 以及自动深浅色主题切换的配置/调度/应用，
 //! 供各小工具复用；不依赖任何窗口或事件框架。
 
+pub mod audit;
 pub mod autodark;
 pub mod panel;
 pub mod paths;

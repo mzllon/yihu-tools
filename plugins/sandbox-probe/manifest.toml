@@ -6,6 +6,6 @@ entry = "probe.py"
 icon = "security-high-symbolic"
 
 [[triggers]]
-keywords = ["probe", "探针", "沙箱"]
+keywords = ["probe", "探针", "沙箱", "copy:", "notify:"]
 
-permissions = []
+permissions = ["clipboard.write"]

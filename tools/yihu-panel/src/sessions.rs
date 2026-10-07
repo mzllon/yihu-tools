@@ -26,6 +26,18 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
 pub enum PluginEvent {
     Results { plugin: String, query_id: u64, items: Vec<PanelEntry> },
     Exited { plugin: String, gen: u64 },
+    Capability(CapRequest),
+}
+
+/// 插件发来的能力请求（capability_request）。gen 用于审计关联；
+/// params 保留原始 JSON，形状校验在 caps::evaluate。
+#[derive(Debug)]
+pub struct CapRequest {
+    pub plugin: String,
+    pub gen: u64,
+    pub request_id: u64,
+    pub capability: String,
+    pub params: serde_json::Value,
 }
 
 struct Session {
@@ -36,6 +48,8 @@ struct Session {
     gen: u64,
     child: Child,
     stdin: ChildStdin,
+    /// manifest 声明的能力集（安装时已过词表白名单），能力代理按它强制
+    permissions: HashSet<String>,
 }
 
 /// 外部插件会话管理器。跨呼出保持（失败历史），会话随面板收起整组杀灭。
@@ -77,6 +91,11 @@ impl PluginMgr {
     /// M4 起插件统一经 bwrap 沙箱拉起（fail-closed：沙箱不可用则不拉起，
     /// 见 sandbox 模块与 docs/插件基座安全模型与发布策略.md）。
     pub fn ensure_sessions(&mut self) {
+        self.ensure_sessions_in(&plugins::plugins_dir(), &plugins::data_home())
+    }
+
+    /// 同上，注册表根与数据根可注入（测试：临时目录，不碰真实用户数据）。
+    pub fn ensure_sessions_in(&mut self, registry: &std::path::Path, data_root: &std::path::Path) {
         let debug = std::env::var_os("YIHU_PANEL_DEBUG").is_some();
         if !crate::sandbox::available() {
             eprintln!(
@@ -85,7 +104,7 @@ impl PluginMgr {
             return;
         }
         let state = yihu_core::plugins::PluginsState::load();
-        let (installed, errors) = plugins::list_installed();
+        let (installed, errors) = plugins::list_installed_in(registry);
         if debug {
             eprintln!(
                 "yihu-panel: ensure_sessions 注册表 {} 个插件，错误 {} 条，现有会话 {}",
@@ -110,7 +129,7 @@ impl PluginMgr {
                 self.disabled_by_failures.insert(id);
                 continue;
             }
-            match self.spawn_session(&inst, debug) {
+            match self.spawn_session(&inst, debug, data_root) {
                 Ok(sess) => {
                     if debug {
                         eprintln!("yihu-panel: 已拉起插件会话 {id}");
@@ -125,17 +144,22 @@ impl PluginMgr {
         }
     }
 
-    fn spawn_session(&mut self, inst: &plugins::Installed, debug: bool) -> io::Result<Session> {
+    fn spawn_session(
+        &mut self,
+        inst: &plugins::Installed,
+        debug: bool,
+        data_root: &std::path::Path,
+    ) -> io::Result<Session> {
         let id = inst.manifest.id.clone();
         self.gen += 1;
         let gen = self.gen;
         // 唯一可写数据目录（0700）；插件目录经 bwrap 只读挂载，运行期写入
         // 全部落在此处，宿主真实路径不进沙箱（init 只给虚拟路径 /data）
-        plugins::ensure_plugin_data_dir(&id)?;
+        plugins::ensure_plugin_data_dir_in(data_root, &id)?;
         let mut child = crate::sandbox::command(
             &inst.manifest.entry,
             &inst.dir,
-            &plugins::plugin_data_dir(&id),
+            &plugins::plugin_data_dir_in(data_root, &id),
         )?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -150,6 +174,7 @@ impl PluginMgr {
             "{{\"type\":\"init\",\"api\":1,\"data_dir\":{}}}",
             serde_json::to_string(&data_dir).expect("路径是合法 JSON 字符串")
         )?;
+        let permissions: HashSet<String> = inst.manifest.permissions.iter().cloned().collect();
         let tx = self.tx.clone();
         let reader_id = id.clone();
         std::thread::spawn(move || {
@@ -157,7 +182,7 @@ impl PluginMgr {
             for line in reader.lines() {
                 match line {
                     Ok(l) => {
-                        if let Some(ev) = parse_line(&reader_id, &l) {
+                        if let Some(ev) = parse_line(&reader_id, gen, &l) {
                             if tx.send(ev).is_err() {
                                 break;
                             }
@@ -168,7 +193,25 @@ impl PluginMgr {
             }
             let _ = tx.send(PluginEvent::Exited { plugin: reader_id, gen });
         });
-        Ok(Session { id, gen, child, stdin })
+        Ok(Session { id, gen, child, stdin, permissions })
+    }
+
+    /// 查询某插件会话声明的能力集（会话不存在 = None，请求无从发起）。
+    pub fn permissions_of(&self, plugin: &str) -> Option<&HashSet<String>> {
+        self.sessions.iter().find(|s| s.id == plugin).map(|s| &s.permissions)
+    }
+
+    /// 回复能力请求（capability_response）。会话已死则静默丢弃。
+    pub fn respond(&mut self, plugin: &str, request_id: u64, ok: bool, error: &str) {
+        let line = if ok {
+            format!("{{\"type\":\"capability_response\",\"id\":{request_id},\"ok\":true}}")
+        } else {
+            format!(
+                "{{\"type\":\"capability_response\",\"id\":{request_id},\"ok\":false,\"error\":{}}}",
+                serde_json::to_string(error).unwrap_or_else(|_| "\"\"".into())
+            )
+        };
+        self.send_all_to(plugin, &line);
     }
 
     /// 每次 keystroke：向全部会话广播查询。空文本清空插件结果。
@@ -201,10 +244,12 @@ impl PluginMgr {
         self.current_query = None;
     }
 
-    /// 主循环 tick 调用：处理结果/退出事件。
-    /// 返回是否有影响展示的变化（新结果 / 插件退出）。
-    pub fn drain(&mut self) -> bool {
+    /// 主循环 tick 调用：处理结果/退出/能力请求事件。
+    /// 返回（是否有影响展示的变化, 待处理能力请求列表）。
+    /// 能力请求在 drain 返回后处理（执行/回复会重借 mgr，不能在借用中回调）。
+    pub fn drain(&mut self) -> (bool, Vec<CapRequest>) {
         let mut dirty = false;
+        let mut caps = Vec::new();
         loop {
             match self.rx.try_recv() {
                 Ok(PluginEvent::Results { plugin, query_id, items }) => {
@@ -224,6 +269,7 @@ impl PluginMgr {
                         dirty = true;
                     }
                 }
+                Ok(PluginEvent::Capability(cap)) => caps.push(cap),
                 Ok(PluginEvent::Exited { plugin, gen }) => {
                     // 只有 (id, gen) 都匹配才认账：旧代（已收起会话）的迟到
                     // 退出事件直接丢弃，否则按 id 会误配新一代活会话，
@@ -250,7 +296,7 @@ impl PluginMgr {
                 Err(_) => break,
             }
         }
-        dirty
+        (dirty, caps)
     }
 
     /// 当前查询下全部插件结果行（应用按 id 稳定排序）。
@@ -321,8 +367,8 @@ impl PluginMgr {
     }
 }
 
-/// 解析插件输出行。非 results 行（ready 等）与解析失败返回 None。
-fn parse_line(plugin: &str, line: &str) -> Option<PluginEvent> {
+/// 解析插件输出行。results/capability_request 有效；其余行返回 None。
+fn parse_line(plugin: &str, gen: u64, line: &str) -> Option<PluginEvent> {
     #[derive(serde::Deserialize)]
     struct Item {
         title: String,
@@ -340,25 +386,205 @@ fn parse_line(plugin: &str, line: &str) -> Option<PluginEvent> {
         query_id: u64,
         #[serde(default)]
         items: Vec<Item>,
+        #[serde(default)]
+        id: u64,
+        #[serde(default)]
+        capability: String,
+        #[serde(default)]
+        params: serde_json::Value,
     }
     let msg = serde_json::from_str::<Msg>(line).ok()?;
-    if msg.kind != "results" || msg.items.is_empty() {
-        return None;
+    match msg.kind.as_str() {
+        "results" => {
+            if msg.items.is_empty() {
+                return None;
+            }
+            let items = msg
+                .items
+                .into_iter()
+                .map(|i| PanelEntry {
+                    title: i.title,
+                    subtitle: i.subtitle,
+                    icon_spec: i.icon,
+                    kind: "plugin",
+                    payload: i.payload,
+                })
+                .collect();
+            Some(PluginEvent::Results {
+                plugin: plugin.to_string(),
+                query_id: msg.query_id,
+                items,
+            })
+        }
+        "capability_request" => {
+            if msg.capability.is_empty() {
+                return None;
+            }
+            Some(PluginEvent::Capability(CapRequest {
+                plugin: plugin.to_string(),
+                gen,
+                request_id: msg.id,
+                capability: msg.capability,
+                params: msg.params,
+            }))
+        }
+        _ => None,
     }
-    let items = msg
-        .items
-        .into_iter()
-        .map(|i| PanelEntry {
-            title: i.title,
-            subtitle: i.subtitle,
-            icon_spec: i.icon,
-            kind: "plugin",
-            payload: i.payload,
-        })
-        .collect();
-    Some(PluginEvent::Results {
-        plugin: plugin.to_string(),
-        query_id: msg.query_id,
-        items,
-    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_results_and_capability_request() {
+        let r = parse_line(
+            "p",
+            7,
+            r#"{"type":"results","query_id":3,"items":[{"title":"t","payload":"x"}]}"#,
+        )
+        .unwrap();
+        match r {
+            PluginEvent::Results { plugin, query_id, items } => {
+                assert_eq!((plugin.as_str(), query_id, items.len()), ("p", 3, 1));
+            }
+            _ => panic!("应为 Results"),
+        }
+
+        let r = parse_line(
+            "p",
+            7,
+            r#"{"type":"capability_request","id":42,"capability":"clipboard.write","params":{"text":"hi"}}"#,
+        )
+        .unwrap();
+        match r {
+            PluginEvent::Capability(req) => {
+                assert_eq!((req.plugin.as_str(), req.gen, req.request_id), ("p", 7, 42));
+                assert_eq!(req.capability, "clipboard.write");
+                assert_eq!(req.params["text"], "hi");
+            }
+            _ => panic!("应为 Capability"),
+        }
+
+        // 非协议行与畸形行忽略
+        assert!(parse_line("p", 1, r#"{"type":"ready"}"#).is_none());
+        assert!(parse_line("p", 1, "not json").is_none());
+        assert!(parse_line("p", 1, r#"{"type":"capability_request"}"#).is_none());
+    }
+
+    // ---- 端到端：真实 bwrap + 假 python 插件走完整能力环 ----
+
+    const FAKE_PY: &str = r#"#!/usr/bin/python3
+import sys, json
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+pending = {}
+for line in sys.stdin:
+    m = json.loads(line)
+    t = m.get("type")
+    if t == "init":
+        send({"type": "ready"})
+    elif t == "query":
+        rid = 1000 + m["id"]
+        cap = "clipboard.write" if m["text"] != "notify" else "notify"
+        send({"type": "capability_request", "id": rid, "capability": cap,
+              "params": {"text": "hello", "summary": "s"}})
+        pending[rid] = m["id"]
+    elif t == "capability_response":
+        qid = pending.pop(m["id"], None)
+        if qid is not None:
+            ok = m.get("ok", False)
+            title = "granted" if ok else "denied:" + m.get("error", "?")
+            send({"type": "results", "query_id": qid,
+                  "items": [{"title": title, "payload": "p"}]})
+"#;
+
+    fn python3_available() -> bool {
+        std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn make_registry(base: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = base.join("fake-plugin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.toml"),
+            "id = \"fake-plugin\"\nname = \"假插件\"\napi = \"^1\"\nentry = \"plugin.py\"\npermissions = [\"clipboard.write\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("plugin.py"), FAKE_PY).unwrap();
+        // 与 install_from_dir 语义一致：入口必须可执行（bwrap 直接 execvp）
+        std::fs::set_permissions(dir.join("plugin.py"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+
+    /// 反复 drain 直到条件满足（超时 panic）。注意 latest 保留旧查询的
+    /// 结果（防闪烁语义），跨查询等待必须用谓词而非「非空」。
+    fn wait_for(
+        mgr: &mut PluginMgr,
+        timeout: Duration,
+        mut cond: impl FnMut(&PluginMgr, &mut Vec<CapRequest>) -> bool,
+    ) -> Vec<CapRequest> {
+        let deadline = Instant::now() + timeout;
+        let mut caps = Vec::new();
+        loop {
+            let (_, mut more) = mgr.drain();
+            caps.append(&mut more);
+            if cond(mgr, &mut caps) {
+                return caps;
+            }
+            if Instant::now() > deadline {
+                panic!("超时：cap={caps:?} rows={:?}", mgr.latest_rows());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn capability_roundtrip_end_to_end() {
+        if !crate::sandbox::available() || !python3_available() {
+            eprintln!("跳过：缺 bwrap 或 python3");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("yihu-sess-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        make_registry(&base);
+        let mut mgr = PluginMgr::new();
+        mgr.ensure_sessions_in(&base, &base);
+
+        // ① 未声明能力（notify）→ 拒绝回环：deny 文案原样回给插件
+        mgr.broadcast("notify");
+        let caps = wait_for(&mut mgr, Duration::from_secs(10), |_, c| !c.is_empty());
+        assert_eq!(caps[0].capability, "notify");
+        assert!(caps[0].gen > 0);
+        let req1 = (caps[0].plugin.clone(), caps[0].request_id);
+        mgr.respond(&req1.0, req1.1, false, "manifest 未声明能力 notify");
+        wait_for(&mut mgr, Duration::from_secs(10), |m, _| {
+            m.latest_rows().iter().any(|r| r.title.starts_with("denied:manifest 未声明能力 notify"))
+        });
+
+        // ② 已声明能力（clipboard.write）→ 授权回环
+        mgr.broadcast("copy");
+        let caps = wait_for(&mut mgr, Duration::from_secs(10), |_, c| !c.is_empty());
+        assert_eq!(caps[0].capability, "clipboard.write");
+        mgr.respond(&caps[0].plugin, caps[0].request_id, true, "");
+        wait_for(&mut mgr, Duration::from_secs(10), |m, _| {
+            m.latest_rows().iter().any(|r| r.title == "granted")
+        });
+
+        // ③ 权限表可查且与 manifest 一致
+        let perms = mgr.permissions_of("fake-plugin").unwrap();
+        assert!(perms.contains("clipboard.write"));
+        assert!(!perms.contains("notify"));
+
+        mgr.kill_all();
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

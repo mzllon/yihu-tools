@@ -26,7 +26,7 @@ use crate::sessions::PluginMgr;
 const MAX_SHOWN: usize = 100;
 
 /// 一条可展示/可执行的条目（nucleo 按标题匹配，其余字段随条目带回）
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PanelEntry {
     pub title: String,
     pub subtitle: String,
@@ -54,6 +54,8 @@ struct Deps {
     faded: Rc<Cell<bool>>,
     /// 定位线程回传 FadeIn 用（与 zbus 命令共用一条泵）
     fade_tx: mpsc::Sender<Cmd>,
+    /// 能力代理审计（后台线程写 JSONL，record 永不阻塞主循环）
+    audit: Rc<yihu_core::audit::Audit>,
 }
 
 /// 当前面板窗口及其专属控件（每次呼出重建一份）
@@ -108,6 +110,7 @@ pub fn run_daemon() {
         }));
         let nuc = Rc::new(RefCell::new(build_nucleo(&apps)));
         let plugins = Rc::new(RefCell::new(PluginMgr::new()));
+        let audit = Rc::new(yihu_core::audit::Audit::open(yihu_core::audit::audit_path()));
         let deps = Rc::new(Deps {
             app: app.clone(),
             plugins,
@@ -122,6 +125,7 @@ pub fn run_daemon() {
             gen: Rc::new(Cell::new(0)),
             faded: Rc::new(Cell::new(false)),
             fade_tx: tx.clone(),
+            audit,
         });
 
         let slot: Slot = Rc::new(RefCell::new(None));
@@ -373,9 +377,15 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
         let sel = sel.clone();
         let win = win.clone();
         let plugins = deps.plugins.clone();
+        let deps_cap = deps.clone();
         glib::timeout_add_local(Duration::from_millis(30), move || {
-            if plugins.borrow_mut().drain() {
+            let (plugin_dirty, cap_reqs) = plugins.borrow_mut().drain();
+            if plugin_dirty {
                 dirty.set(true);
+            }
+            // 能力请求在 drain 归还后处理：执行与回复都要重借 mgr
+            for req in cap_reqs {
+                handle_capability(&deps_cap, req);
             }
             let changed = nuc.borrow_mut().tick(4).changed;
             if !(changed || dirty.get()) {
@@ -564,6 +574,77 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
         entry,
         tick: Some(tick),
     }
+}
+
+/// 能力请求处理：授权（manifest 声明 + 参数校验）→ 执行 → 回复 + 审计。
+/// 授权失败/执行失败都以 ok:false 回复，插件据此降级。
+fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
+    let declared = deps
+        .plugins
+        .borrow()
+        .permissions_of(&req.plugin)
+        .cloned()
+        .unwrap_or_default();
+    let outcome = match crate::caps::evaluate(&declared, &req.capability, &req.params) {
+        Ok(action) => execute_capability(action),
+        Err(e) => Err(e),
+    };
+    match outcome {
+        Ok(()) => {
+            deps.plugins
+                .borrow_mut()
+                .respond(&req.plugin, req.request_id, true, "");
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", "");
+        }
+        Err(e) => {
+            deps.plugins
+                .borrow_mut()
+                .respond(&req.plugin, req.request_id, false, &e);
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "deny", &e);
+        }
+    }
+}
+
+/// 执行已授权的能力动作。GTK 动作在主线程（tick 内天然成立）；
+/// 子进程动作 detached，不随面板收起被杀。
+fn execute_capability(action: crate::caps::CapAction) -> Result<(), String> {
+    match action {
+        crate::caps::CapAction::ClipboardWrite(text) => {
+            let Some(display) = gdk::Display::default() else {
+                return Err("无默认显示".into());
+            };
+            display.clipboard().set_text(&text);
+            Ok(())
+        }
+        crate::caps::CapAction::OpenUri(uri) => spawn_detached_checked("xdg-open", &[&uri]),
+        crate::caps::CapAction::LaunchApp(desktop_id) => {
+            if launch_app(&desktop_id) {
+                Ok(())
+            } else {
+                Err(format!("应用不存在或无法启动：{desktop_id}"))
+            }
+        }
+        crate::caps::CapAction::Notify { summary, body } => {
+            if body.is_empty() {
+                spawn_detached_checked("notify-send", &[&summary])
+            } else {
+                spawn_detached_checked("notify-send", &[&summary, &body])
+            }
+        }
+    }
+}
+
+fn spawn_detached_checked(program: &str, args: &[&str]) -> Result<(), String> {
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("{program} 启动失败：{e}"))
 }
 
 /// 按 kind 分发条目动作：app 启动 / cap 执行 / calc 复制 / plugin 转发。
