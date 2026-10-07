@@ -844,8 +844,8 @@ for line in sys.stdin:
         let caps = wait_for(&mut mgr, Duration::from_secs(10), |_, c| {
             c.iter().any(|r| r.capability == "screenshot.take")
         });
+        // 两个插件都会广播该请求（都不声明此能力），先到者任意
         let shot = caps.iter().find(|r| r.capability == "screenshot.take").unwrap();
-        assert_eq!(shot.plugin, "fake-plugin", "plain-plugin 未先命中（无妨，任一均可）");
         mgr.respond_gen(&shot.plugin, shot.gen, shot.request_id, false, "manifest 未声明能力 screenshot.take");
         wait_for(&mut mgr, Duration::from_secs(10), |m, _| {
             m.latest_rows().iter().any(|r| r.title.contains("screenshot.take"))
