@@ -22,6 +22,11 @@ use crate::app::PanelEntry;
 
 const MAX_FAILURES: usize = 4;
 const FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// 常驻会话空闲自退阈值（M4 冻结决策 #7：socket-activation 列 M5，
+/// v1 = 收起不杀 + 空闲发 shutdown 自退）
+pub const RESIDENT_IDLE_EXIT: Duration = Duration::from_secs(300);
+/// shutdown 后的宽限：仍不退出则组级 SIGKILL
+pub const RESIDENT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 pub enum PluginEvent {
     Results { plugin: String, query_id: u64, items: Vec<PanelEntry> },
@@ -50,6 +55,12 @@ struct Session {
     stdin: ChildStdin,
     /// manifest 声明的能力集（安装时已过词表白名单），能力代理按它强制
     permissions: HashSet<String>,
+    /// 常驻 provider：收起不杀，空闲自退
+    resident: bool,
+    /// 已发 shutdown、等待自退（Exited 不计失败；超宽限强杀）
+    shutting_down_since: Option<Instant>,
+    /// 最近一次宿主→插件通信时刻（query/activate），空闲自退的基准
+    last_used: Instant,
 }
 
 /// 外部插件会话管理器。跨呼出保持（失败历史），会话随面板收起整组杀灭。
@@ -197,7 +208,16 @@ impl PluginMgr {
             }
             let _ = tx.send(PluginEvent::Exited { plugin: reader_id, gen });
         });
-        Ok(Session { id, gen, child, stdin, permissions })
+        Ok(Session {
+            id,
+            gen,
+            child,
+            stdin,
+            permissions,
+            resident: inst.manifest.resident,
+            shutting_down_since: None,
+            last_used: Instant::now(),
+        })
     }
 
     /// 查询某插件会话声明的能力集（会话不存在 = None，请求无从发起）。
@@ -247,6 +267,8 @@ impl PluginMgr {
             .sessions
             .iter_mut()
             .filter_map(|s| {
+                // 任何宿主→插件通信都刷新空闲基准
+                s.last_used = Instant::now();
                 let line = match (
                     &files_json,
                     s.permissions
@@ -270,18 +292,84 @@ impl PluginMgr {
         }
     }
 
-    /// 收起时调用：进程组级 SIGKILL，整组杀灭。
+    /// 收起时调用：进程组级 SIGKILL 杀灭非常驻会话；常驻会话保留
+    /// （空闲自退交由 sweep_idle），仅清结果与上下文。
     pub fn kill_all(&mut self) {
-        for s in &mut self.sessions {
+        let keep: Vec<usize> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.resident)
+            .map(|(i, _)| i)
+            .collect();
+        for (i, s) in self.sessions.iter_mut().enumerate() {
+            if keep.contains(&i) {
+                continue;
+            }
             unsafe {
                 libc::kill(-(s.child.id() as i32), libc::SIGKILL);
             }
             let _ = s.child.wait();
         }
-        self.sessions.clear();
+        self.sessions.retain(|s| s.resident);
         self.latest.clear();
         self.current_query = None;
         self.context_files.clear(); // 选中文件上下文一次性：收起即失效
+    }
+
+    /// 常驻会话空闲清扫（面板隐藏时由常驻泵调用）：空闲超阈值发
+    /// shutdown；宽限后仍不退则组级 SIGKILL。返回是否发生了清扫
+    /// （调试日志用）。
+    pub fn sweep_idle(&mut self) -> bool {
+        self.sweep_idle_with(RESIDENT_IDLE_EXIT, RESIDENT_SHUTDOWN_GRACE)
+    }
+
+    /// 同上，阈值可注入（测试用）。
+    pub fn sweep_idle_with(&mut self, idle_exit: Duration, grace: Duration) -> bool {
+        let mut acted = false;
+        for s in &mut self.sessions {
+            if !s.resident {
+                continue;
+            }
+            match s.shutting_down_since {
+                None => {
+                    if s.last_used.elapsed() >= idle_exit {
+                        let line = "{\"type\":\"shutdown\"}";
+                        if s.stdin.write_all(line.as_bytes()).is_ok()
+                            && s.stdin.write_all(b"\n").is_ok()
+                            && s.stdin.flush().is_ok()
+                        {
+                            s.shutting_down_since = Some(Instant::now());
+                            acted = true;
+                        } else {
+                            // 管道已断：插件已死，交给 Exited 事件处理
+                            acted = true;
+                        }
+                    }
+                }
+                Some(t0) => {
+                    if t0.elapsed() >= grace {
+                        unsafe {
+                            libc::kill(-(s.child.id() as i32), libc::SIGKILL);
+                        }
+                        let _ = s.child.wait();
+                        acted = true;
+                        // 会话移除交给 Exited 事件（读线程 EOF 已必至）
+                    }
+                }
+            }
+        }
+        acted
+    }
+
+    /// 常驻会话是否仍在（跨收起存活校验，测试/调试用）
+    pub fn is_session_alive(&self, plugin: &str) -> bool {
+        self.sessions.iter().any(|s| s.id == plugin)
+    }
+
+    /// 某插件当前滑动窗口内的失败计数（测试/调试用）
+    pub fn failures_of(&self, plugin: &str) -> usize {
+        self.recent_failures(plugin)
     }
 
     /// 主循环 tick 调用：处理结果/退出/能力请求事件。
@@ -319,6 +407,8 @@ impl PluginMgr {
                         .iter()
                         .position(|s| s.id == plugin && s.gen == gen)
                     {
+                        // 空闲自退（shutdown 后退出）不算失败
+                        let shutting_down = self.sessions[i].shutting_down_since.is_some();
                         let s = &mut self.sessions[i];
                         // 读线程已见 stdout EOF；组级 SIGKILL 确保进程真正
                         // 终结，wait() 与 kill_all 同约定（有界）
@@ -327,7 +417,9 @@ impl PluginMgr {
                         }
                         let _ = s.child.wait();
                         self.sessions.remove(i);
-                        self.record_failure(&plugin);
+                        if !shutting_down {
+                            self.record_failure(&plugin);
+                        }
                         if self.latest.remove(&plugin).is_some() {
                             dirty = true;
                         }
@@ -363,6 +455,7 @@ impl PluginMgr {
             if s.id != plugin {
                 continue;
             }
+            s.last_used = Instant::now();
             if s.stdin.write_all(line.as_bytes()).is_ok()
                 && s.stdin.write_all(b"\n").is_ok()
                 && s.stdin.flush().is_ok()
@@ -526,6 +619,8 @@ for line in sys.stdin:
             title = "granted" if ok else "denied:" + m.get("error", "?")
             send({"type": "results", "query_id": qid,
                   "items": [{"title": title, "payload": "p"}]})
+    elif t == "shutdown":
+        sys.exit(0)  # 常驻空闲自退（M4 二期②）
 "#;
 
     fn python3_available() -> bool {
@@ -539,18 +634,25 @@ for line in sys.stdin:
     }
 
     /// fake-plugin：声明 clipboard.write + selected_files.read；
-    /// plain-plugin：零权限（验证 context 门控与能力拒绝）
+    /// plain-plugin：零权限 + 常驻（验证 context 门控、能力拒绝与
+    /// resident 空闲自退）
     fn make_registry(base: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
-        for (id, name, perms) in [
-            ("fake-plugin", "假插件", "[\"clipboard.write\", \"selected_files.read\"]"),
-            ("plain-plugin", "素插件", "[]"),
+        for (id, name, perms, resident) in [
+            (
+                "fake-plugin",
+                "假插件",
+                "[\"clipboard.write\", \"selected_files.read\"]",
+                false,
+            ),
+            ("plain-plugin", "素插件", "[]", true),
         ] {
             let dir = base.join(id);
             std::fs::create_dir_all(&dir).unwrap();
+            let resident_line = if resident { "resident = true\n" } else { "" };
             std::fs::write(
                 dir.join("manifest.toml"),
-                format!("id = \"{id}\"\nname = \"{name}\"\napi = \"^1\"\nentry = \"plugin.py\"\npermissions = {perms}\n"),
+                format!("id = \"{id}\"\nname = \"{name}\"\napi = \"^1\"\nentry = \"plugin.py\"\npermissions = {perms}\n{resident_line}"),
             )
             .unwrap();
             std::fs::write(dir.join("plugin.py"), FAKE_PY).unwrap();
@@ -625,13 +727,21 @@ for line in sys.stdin:
             let titles: Vec<String> = m.latest_rows().iter().map(|r| r.title.clone()).collect();
             titles.contains(&"files:2".to_string()) && titles.contains(&"files:0".to_string())
         });
-        // 收起即清：kill_all 后再注入并广播，无会话应答（不给等待窗口）
+        // ⑤ 常驻（resident）：kill_all 后 plain-plugin 存活、fake-plugin
+        //    已死；空闲超阈值立即 shutdown → 插件 exit(0) 自退且不计失败
         mgr.kill_all();
+        assert!(!mgr.is_session_alive("fake-plugin"));
+        assert!(mgr.is_session_alive("plain-plugin"));
+        mgr.sweep_idle_with(Duration::ZERO, Duration::from_secs(10));
+        wait_for(&mut mgr, Duration::from_secs(10), |m, _| {
+            !m.is_session_alive("plain-plugin")
+        });
+        assert_eq!(mgr.failures_of("plain-plugin"), 0, "自退不是失败");
+
+        // ⑥ 收起即清：全部会话结束后再注入并广播，无任何应答
         mgr.set_context_files(vec!["/tmp/a.txt".into()]);
         mgr.broadcast("files");
         assert!(mgr.latest_rows().is_empty(), "会话已收起，不应有结果");
-
-        // ④ 无残余会话
         assert!(mgr.permissions_of("fake-plugin").is_none());
         let _ = std::fs::remove_dir_all(&base);
     }

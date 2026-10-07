@@ -137,6 +137,11 @@ pub fn run_daemon() {
             let app = app.clone();
             glib::timeout_add_local(Duration::from_millis(50), move || {
                 let mut quit = false;
+                // 常驻 provider 空闲清扫只在隐藏态跑（可见态 keystroke
+                // 持续刷新 last_used，清扫无意义且会打断正在交互的插件）
+                if !deps.visible.load(Ordering::Relaxed) {
+                    let _ = deps.plugins.borrow_mut().sweep_idle();
+                }
                 while let Ok(cmd) = rx.try_recv() {
                     match cmd {
                         Cmd::Toggle => {

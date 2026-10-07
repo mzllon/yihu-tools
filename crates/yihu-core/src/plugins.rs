@@ -41,6 +41,10 @@ pub struct Manifest {
     pub triggers: Vec<Trigger>,
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// 常驻 provider（M4 二期）：true = 面板收起不杀，空闲 300s 宿主发
+    /// shutdown 自退（5s 宽限后强杀）。常驻不改变沙箱与能力代理要求。
+    #[serde(default)]
+    pub resident: bool,
 }
 
 /// 解析并校验 manifest。校验项：id/name/entry 非空、id 字符集、
