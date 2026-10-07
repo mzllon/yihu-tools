@@ -28,6 +28,8 @@ fn main() {
         Some("hide") => std::process::exit(service::run_cli(service::Cmd::Hide)),
         Some("quit") => std::process::exit(service::run_cli(service::Cmd::Quit)),
         Some("status") => std::process::exit(service::run_status()),
+        // shot：截图快捷键入口（全局热键注册的命令）
+        Some("shot") => std::process::exit(service::run_cli(service::Cmd::Screenshot)),
         // files <路径>…：注入选中文件上下文并呼出面板（files 触发，二期）
         Some("files") => {
             let paths: Vec<String> = std::env::args().skip(2).collect();
@@ -43,7 +45,7 @@ fn main() {
         }
         Some(other) => {
             eprintln!(
-                "未知子命令 {other:?}\n用法: yihu-panel [toggle|show|hide|quit|status|files <路径>…]"
+                "未知子命令 {other:?}\n用法: yihu-panel [toggle|show|hide|quit|status|files <路径>…|shot]"
             );
             std::process::exit(2);
         }

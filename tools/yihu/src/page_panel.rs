@@ -34,6 +34,7 @@ const PRESETS: &[(&str, &str)] = &[
 struct Ui {
     autostart_sync: Cell<bool>,
     hotkey_sync: Cell<bool>,
+    shot_sync: Cell<bool>,
     busy: Cell<bool>,
     autostart_switch: Switch,
     autostart_state: Label,
@@ -41,6 +42,8 @@ struct Ui {
     hotkey_state: Label,
     hotkey_result: Label,
     preset: DropDown,
+    shot_state: Label,
+    shot_preset: DropDown,
     pos_state: Label,
 }
 
@@ -106,6 +109,43 @@ pub fn build_page() -> gtk::Widget {
     hk_hint.set_wrap(true);
     hk_hint.set_halign(Align::Start);
     hk_card.append(&hk_hint);
+
+    // —— 卡片：截图快捷键 ——
+    let shot_card = card();
+    let shot_title = Label::new(Some("截图快捷键"));
+    shot_title.add_css_class("sec-title");
+    shot_title.set_halign(Align::Start);
+    shot_card.append(&shot_title);
+    let shot_preset_row = GtkBox::new(Orientation::Horizontal, 8);
+    let shot_preset_label = Label::new(Some("快捷键"));
+    shot_preset_label.set_halign(Align::Start);
+    shot_preset_label.set_hexpand(true);
+    let shot_names: Vec<&str> = PRESETS.iter().map(|(n, _)| *n).collect();
+    let shot_preset = DropDown::from_strings(&shot_names);
+    shot_preset.set_valign(Align::Center);
+    shot_preset_row.append(&shot_preset_label);
+    shot_preset_row.append(&shot_preset);
+    shot_card.append(&shot_preset_row);
+    let (shot_row, shot_state) = status_row("当前注册");
+    shot_card.append(&shot_row);
+    let shot_btn_row = GtkBox::new(Orientation::Horizontal, 8);
+    let shot_reg_btn = Button::with_label("注册到系统");
+    let shot_unreg_btn = Button::with_label("从系统移除");
+    shot_btn_row.append(&shot_reg_btn);
+    shot_btn_row.append(&shot_unreg_btn);
+    shot_btn_row.set_halign(Align::Start);
+    shot_card.append(&shot_btn_row);
+    let shot_hint = Label::new(Some(
+        "按下快捷键直接打开截图工具（区域/窗口/录屏），无需先呼出面板；\n\
+         与截图插件共用同一套系统截屏通道。注册写入 GNOME「自定义快捷键」\n\
+         （独立条目「一呼截图」，不动其他键）。默认 Ctrl+Alt+A；与系统内置\n\
+         Print 键无冲突。",
+    ));
+    shot_hint.add_css_class("dim-label");
+    shot_hint.add_css_class("caption-sm");
+    shot_hint.set_wrap(true);
+    shot_hint.set_halign(Align::Start);
+    shot_card.append(&shot_hint);
 
     // —— 卡片：开机自启 ——
     let as_card = card();
@@ -186,7 +226,7 @@ pub fn build_page() -> gtk::Widget {
     main_box.set_margin_start(24);
     main_box.set_margin_end(24);
     main_box.set_valign(Align::Start);
-    for c in [&proc_card, &hk_card, &pos_card, &as_card, &note_card] {
+    for c in [&proc_card, &hk_card, &shot_card, &pos_card, &as_card, &note_card] {
         c.set_hexpand(true);
         main_box.append(c);
     }
@@ -194,6 +234,7 @@ pub fn build_page() -> gtk::Widget {
     let ui = Rc::new(Ui {
         autostart_sync: Cell::new(false),
         hotkey_sync: Cell::new(false),
+        shot_sync: Cell::new(false),
         busy: Cell::new(false),
         autostart_switch,
         autostart_state,
@@ -201,6 +242,8 @@ pub fn build_page() -> gtk::Widget {
         hotkey_state,
         hotkey_result,
         preset,
+        shot_state,
+        shot_preset,
         pos_state,
     });
 
@@ -209,6 +252,8 @@ pub fn build_page() -> gtk::Widget {
     let unreg_slot: Slot = Arc::new(Mutex::new(None));
     let quit_slot: Slot = Arc::new(Mutex::new(None));
     let pos_slot: Slot = Arc::new(Mutex::new(None));
+    let shot_reg_slot: Slot = Arc::new(Mutex::new(None));
+    let shot_unreg_slot: Slot = Arc::new(Mutex::new(None));
 
     // —— 信号：安装 / 移除定位扩展 ——
     {
@@ -295,6 +340,51 @@ pub fn build_page() -> gtk::Widget {
         });
     }
 
+    // —— 信号：截图快捷键注册 / 移除 ——
+    {
+        let ui = ui.clone();
+        let slot = shot_reg_slot.clone();
+        shot_reg_btn.connect_clicked(move |_| {
+            let binding = ui.selected_shot_binding();
+            run_bg(&ui, &slot, move || {
+                let mut cfg = panel::Config::load();
+                cfg.screenshot_hotkey = binding.clone();
+                cfg.save().ok();
+                match panel_command_shot()
+                    .and_then(|cmd| panel::register_screenshot_hotkey(&binding, &cmd))
+                {
+                    Ok(()) => Ok(format!("已注册 {binding}")),
+                    Err(e) => Err(e.to_string()),
+                }
+            });
+        });
+    }
+    {
+        let ui = ui.clone();
+        let slot = shot_unreg_slot.clone();
+        shot_unreg_btn.connect_clicked(move |_| {
+            run_bg(&ui, &slot, || {
+                panel::remove_screenshot_hotkey()
+                    .map(|_| "已从系统移除".to_string())
+                    .map_err(|e| e.to_string())
+            });
+        });
+    }
+    {
+        let ui = ui.clone();
+        let preset = ui.shot_preset.clone();
+        preset.connect_selected_notify(move |d| {
+            if ui.shot_sync.get() {
+                return;
+            }
+            if let Some((_, binding)) = PRESETS.get(d.selected() as usize) {
+                let mut cfg = panel::Config::load();
+                cfg.screenshot_hotkey = binding.to_string();
+                cfg.save().ok();
+            }
+        });
+    }
+
     // —— 信号：下拉切换即保存配置 ——
     {
         let ui = ui.clone();
@@ -362,6 +452,13 @@ impl Ui {
             .unwrap_or_else(|| panel::DEFAULT_HOTKEY.to_string())
     }
 
+    fn selected_shot_binding(&self) -> String {
+        PRESETS
+            .get(self.shot_preset.selected() as usize)
+            .map(|(_, b)| b.to_string())
+            .unwrap_or_else(|| panel::DEFAULT_SCREENSHOT_HOTKEY.to_string())
+    }
+
     fn refresh(&self) {
         // 面板进程资源
         self.panel_res.set_text(&match yihu_core::find_process_stats("yihu-panel") {
@@ -387,6 +484,24 @@ impl Ui {
                 self.hotkey_sync.set(true);
                 self.preset.set_selected(pos as u32);
                 self.hotkey_sync.set(false);
+            }
+        }
+
+        // 截图快捷键
+        let shot_registered = panel::registered_screenshot_hotkey();
+        let shot_text = match &shot_registered {
+            Some(b) => format!("已注册（{b}）"),
+            None => "未注册".to_string(),
+        };
+        self.shot_state.set_text(&shot_text);
+        let shot_current = shot_registered.or_else(|| Some(panel::Config::load().screenshot_hotkey));
+        if let Some(b) = shot_current {
+            if !b.is_empty() {
+                if let Some(pos) = PRESETS.iter().position(|(_, pb)| pb == &b) {
+                    self.shot_sync.set(true);
+                    self.shot_preset.set_selected(pos as u32);
+                    self.shot_sync.set(false);
+                }
             }
         }
 
@@ -425,6 +540,11 @@ fn panel_path() -> io::Result<PathBuf> {
 /// 注册到系统的命令：绝对路径 + toggle 子命令
 fn panel_command() -> io::Result<String> {
     Ok(format!("{} toggle", panel_path()?.display()))
+}
+
+/// 截图快捷键命令：绝对路径 + shot 子命令
+fn panel_command_shot() -> io::Result<String> {
+    Ok(format!("{} shot", panel_path()?.display()))
 }
 
 /// 调用面板 CLI（quit 等短命令），阻塞式——仅限后台线程使用

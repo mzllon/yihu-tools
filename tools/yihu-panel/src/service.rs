@@ -28,6 +28,9 @@ pub enum Cmd {
     /// 选中文件上下文（Nautilus 扩展 / CLI 注入，二期 files 触发）。
     /// 只经显式用户动作进入面板；能力代理按 manifest 权限转发给插件。
     SelectFiles(Vec<String>),
+    /// 截图快捷键触发（全局热键 → `yihu-panel shot`）：宿主直接经
+    /// portal 交互截屏（与截图插件的 screenshot.take 同一实现）。
+    Screenshot,
 }
 
 pub struct PanelService {
@@ -51,6 +54,9 @@ impl PanelService {
     }
     fn select_files(&self, uris: Vec<String>) {
         let _ = self.tx.lock().unwrap().send(Cmd::SelectFiles(uris));
+    }
+    fn screenshot(&self) {
+        let _ = self.tx.lock().unwrap().send(Cmd::Screenshot);
     }
     #[zbus(property)]
     fn visible(&self) -> bool {
@@ -87,6 +93,9 @@ fn call(conn: &zbus::blocking::Connection, cmd: Cmd) -> zbus::Result<()> {
         Cmd::Quit => { let _: () = proxy.call("Quit", &())?; }
         Cmd::SelectFiles(uris) => {
             let _: () = proxy.call("SelectFiles", &(&uris,))?;
+        }
+        Cmd::Screenshot => {
+            let _: () = proxy.call("Screenshot", &())?;
         }
         // FadeIn 是定位线程回传守护进程的内部命令，CLI 不会发送
         Cmd::FadeIn(_) => {}

@@ -245,6 +245,13 @@ pub fn run_daemon() {
                             .respond_gen(&out.plugin, out.gen, out.request_id, false, &out.error);
                         deps.audit
                             .record(&out.plugin, out.gen, "screenshot.take", "error", &out.error);
+                        // 用户主动取消：只审计，不弹通知打扰
+                        if out.error != "已取消" {
+                            let _ = spawn_detached_checked(
+                                "notify-send",
+                                &["--app-name=一呼", &format!("截图失败：{}", out.error)],
+                            );
+                        }
                     }
                 }
                 // 常驻 provider 空闲清扫只在隐藏态跑（可见态 keystroke
@@ -260,6 +267,35 @@ pub fn run_daemon() {
                             } else {
                                 summon(&deps, &slot);
                             }
+                        }
+                        Cmd::Screenshot => {
+                            // 快捷键截图：后台 portal 交互截屏，结果经
+                            // cap_async 槽回常驻泵（回包对未知插件是
+                            // no-op，审计/通知统一在泵里做）
+                            deps.audit
+                                .record("hotkey", 0, "screenshot.take", "grant", "");
+                            let slot = deps.cap_async.clone();
+                            std::thread::spawn(move || {
+                                let (ok, error, path) =
+                                    match crate::screenshot::take("area", false) {
+                                        Ok(_) => (
+                                            true,
+                                            String::new(),
+                                            crate::screenshot::latest_shot_hint(),
+                                        ),
+                                        Err(e) => (false, e, String::new()),
+                                    };
+                                slot.lock().unwrap().push(CapOutcome {
+                                    plugin: "hotkey".into(),
+                                    gen: 0,
+                                    request_id: 0,
+                                    ok,
+                                    error,
+                                    path,
+                                    png: None,
+                                    clipboard: false,
+                                });
+                            });
                         }
                         Cmd::Show => summon(&deps, &slot),
                         Cmd::Hide => hide_panel(&deps, &slot),
@@ -772,7 +808,14 @@ fn spawn_screenshot_job(deps: &Deps, req: &crate::sessions::CapRequest, mode: &s
     let mode = mode.to_string();
     std::thread::spawn(move || {
         let (ok, error, path, png) = match crate::screenshot::take(&mode, clipboard) {
-            Ok(png) => (true, String::new(), latest_shot_path_hint(&mode), png),
+            Ok(png) => {
+                let path = if mode == "area" {
+                    crate::screenshot::latest_shot_hint()
+                } else {
+                    String::new()
+                };
+                (true, String::new(), path, png)
+            }
             Err(e) => (false, e, String::new(), None),
         };
         slot.lock().unwrap().push(CapOutcome {
@@ -786,35 +829,6 @@ fn spawn_screenshot_job(deps: &Deps, req: &crate::sessions::CapRequest, mode: &s
             clipboard,
         });
     });
-}
-
-/// 通知用路径提示：portal 响应里的 URI 在 screenshot::take 内部解析，
-/// 这里从 Pictures 目录取最新文件兜底（通知文案用途，失败不碍事）。
-fn latest_shot_path_hint(mode: &str) -> String {
-    let dir = std::env::var("XDG_PICTURES_DIR")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(
-                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
-            )
-            .join("图片")
-        });
-    let shot_dir = dir.join("Screenshots");
-    let best = std::fs::read_dir(&shot_dir)
-        .ok()
-        .and_then(|rd| {
-            rd.flatten()
-                .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
-                .map(|e| e.path())
-                .max_by_key(|p| {
-                    p.metadata()
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                })
-        });
-    best.map(|p| p.display().to_string())
-        .unwrap_or_else(|| (mode == "area").then(|| "已按所选区域保存".to_string()).unwrap_or_default())
 }
 
 /// 执行已授权的能力动作。GTK 动作在主线程（tick 内天然成立）；

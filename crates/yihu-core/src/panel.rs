@@ -15,10 +15,15 @@ use crate::paths;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_HOTKEY: &str = "<Alt>space";
-/// 本项目快捷键在 relocatable schema 下的固定路径
+/// 本项目快捷键在 relocatable schema 下的固定路径（面板呼出）
 pub const KEYBINDING_PATH: &str =
     "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/customYihuPanel/";
 pub const PANEL_NAME: &str = "一呼面板";
+/// 截图快捷键槽位（同一 relocatable schema 下的第二个固定路径）
+pub const SCREENSHOT_KEYBINDING_PATH: &str =
+    "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/customYihuShot/";
+pub const SCREENSHOT_NAME: &str = "一呼截图";
+pub const DEFAULT_SCREENSHOT_HOTKEY: &str = "<Control><Alt>A";
 
 const SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
 const SCHEMA_KEY: &str = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding";
@@ -27,6 +32,8 @@ const LIST_KEY: &str = "custom-keybindings";
 #[derive(Debug, Clone)]
 pub struct Config {
     pub hotkey: String,
+    /// 截图快捷键（空串 = 未配置，注册时用默认值）
+    pub screenshot_hotkey: String,
     /// 摆放位置在「上部居中」基准上再上移的像素数
     pub place_offset_up: i32,
 }
@@ -35,6 +42,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             hotkey: DEFAULT_HOTKEY.into(),
+            screenshot_hotkey: DEFAULT_SCREENSHOT_HOTKEY.into(),
             place_offset_up: 100,
         }
     }
@@ -61,6 +69,7 @@ impl Config {
             let Some((k, v)) = line.split_once('=') else { continue };
             match (k.trim(), v.trim()) {
                 ("hotkey", v) if !v.is_empty() => c.hotkey = v.to_string(),
+                ("screenshot_hotkey", v) => c.screenshot_hotkey = v.to_string(),
                 ("place_offset_up", v) => if let Ok(n) = v.parse::<i32>() { c.place_offset_up = n },
                 _ => {}
             }
@@ -78,6 +87,7 @@ impl Config {
             };
             match (k.trim(), v.trim()) {
                 ("hotkey", v) if !v.is_empty() => c.hotkey = v.to_string(),
+                ("screenshot_hotkey", v) => c.screenshot_hotkey = v.to_string(),
                 ("place_offset_up", v) => {
                     if let Ok(n) = v.parse::<i32>() {
                         c.place_offset_up = n;
@@ -91,8 +101,8 @@ impl Config {
 
     pub fn to_text(&self) -> String {
         format!(
-            "# 一呼面板配置\nhotkey = {}\nplace_offset_up = {}\n",
-            self.hotkey, self.place_offset_up
+            "# 一呼面板配置\nhotkey = {}\nscreenshot_hotkey = {}\nplace_offset_up = {}\n",
+            self.hotkey, self.screenshot_hotkey, self.place_offset_up
         )
     }
 
@@ -190,18 +200,34 @@ pub fn read_keybinding_list() -> io::Result<String> {
 /// 因此本函数：注册前自动解除内置占用（`gsettings reset` 可恢复），
 /// 再以「摘除 → 写回」列表的方式强制 gsd 重新抓取。
 pub fn register_hotkey(hotkey: &str, command: &str) -> io::Result<()> {
+    register_hotkey_slot(KEYBINDING_PATH, PANEL_NAME, hotkey, command)
+}
+
+/// 同上，槽位泛化版（截图快捷键等第二个及以上热键共用同一套
+/// 「摘除 → 写回」强制 gsd 重抓机制）。
+pub fn register_hotkey_slot(
+    slot_path: &str,
+    name: &str,
+    hotkey: &str,
+    command: &str,
+) -> io::Result<()> {
     let existing = read_keybinding_list()?;
-    let list_with = merge_keybinding_list(&existing, KEYBINDING_PATH)
+    let list_with = merge_keybinding_list(&existing, slot_path)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let list_without = strip_keybinding_list(&existing, KEYBINDING_PATH)
+    let list_without = strip_keybinding_list(&existing, slot_path)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     clear_wm_conflict(hotkey)?;
     run_gsettings(&["set", SCHEMA, LIST_KEY, &list_without])?;
-    let base = format!("{SCHEMA_KEY}:{KEYBINDING_PATH}");
-    run_gsettings(&["set", &base, "name", PANEL_NAME])?;
+    let base = format!("{SCHEMA_KEY}:{slot_path}");
+    run_gsettings(&["set", &base, "name", name])?;
     run_gsettings(&["set", &base, "command", command])?;
     run_gsettings(&["set", &base, "binding", hotkey])?;
     run_gsettings(&["set", SCHEMA, LIST_KEY, &list_with])
+}
+
+/// 注册截图快捷键（命令应为 `<安装目录>/yihu-panel shot`）。
+pub fn register_screenshot_hotkey(hotkey: &str, command: &str) -> io::Result<()> {
+    register_hotkey_slot(SCREENSHOT_KEYBINDING_PATH, SCREENSHOT_NAME, hotkey, command)
 }
 
 /// GNOME 内置键与请求的热键相同时，清空之（Windows 惯例的 Alt+Space 正撞此键）。
@@ -216,22 +242,40 @@ fn clear_wm_conflict(hotkey: &str) -> io::Result<()> {
 
 /// 移除注册：从列表摘除我们的路径并 reset 三个键（对未注册场景幂等）。
 pub fn remove_hotkey() -> io::Result<()> {
+    remove_hotkey_slot(KEYBINDING_PATH)
+}
+
+/// 同上，槽位泛化版。
+pub fn remove_hotkey_slot(slot_path: &str) -> io::Result<()> {
     let existing = read_keybinding_list()?;
-    let merged = strip_keybinding_list(&existing, KEYBINDING_PATH)
+    let merged = strip_keybinding_list(&existing, slot_path)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     run_gsettings(&["set", SCHEMA, LIST_KEY, &merged])?;
-    let base = format!("{SCHEMA_KEY}:{KEYBINDING_PATH}");
+    let base = format!("{SCHEMA_KEY}:{slot_path}");
     run_gsettings(&["reset", &base, "name"])?;
     run_gsettings(&["reset", &base, "command"])?;
     run_gsettings(&["reset", &base, "binding"])
 }
 
+pub fn remove_screenshot_hotkey() -> io::Result<()> {
+    remove_hotkey_slot(SCREENSHOT_KEYBINDING_PATH)
+}
+
 /// 读取我们路径下已注册的快捷键（未注册或读取失败返回 None）。
 pub fn registered_hotkey() -> Option<String> {
-    let base = format!("{SCHEMA_KEY}:{KEYBINDING_PATH}");
+    registered_hotkey_at(KEYBINDING_PATH)
+}
+
+/// 读取指定槽位已注册的快捷键（未注册或读取失败返回 None）。
+pub fn registered_hotkey_at(slot_path: &str) -> Option<String> {
+    let base = format!("{SCHEMA_KEY}:{slot_path}");
     let v = read_gsettings(&["get", &base, "binding"]).ok()?;
     let s = v.trim().trim_matches('\'');
     (!s.is_empty() && s != "@ss ''").then(|| s.to_string())
+}
+
+pub fn registered_screenshot_hotkey() -> Option<String> {
+    registered_hotkey_at(SCREENSHOT_KEYBINDING_PATH)
 }
 
 // ---- 使用历史（默认集「最近使用」的数据源）----
@@ -369,10 +413,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yihu-panel-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join("panel.conf");
-        fs::write(&p, "hotkey = <Alt>z\nplace_offset_up = 80\n").unwrap();
+        fs::write(&p, "hotkey = <Alt>z\nscreenshot_hotkey = <Control><Alt>P\nplace_offset_up = 80\n").unwrap();
         let c = Config::read_from(&p).unwrap();
         assert_eq!(c.hotkey, "<Alt>z");
+        assert_eq!(c.screenshot_hotkey, "<Control><Alt>P");
         assert_eq!(c.place_offset_up, 80);
+        // 未写 screenshot_hotkey 的旧配置回退默认值
+        fs::write(&p, "hotkey = <Alt>z\n").unwrap();
+        let c = Config::read_from(&p).unwrap();
+        assert_eq!(c.screenshot_hotkey, DEFAULT_SCREENSHOT_HOTKEY);
+        // 显式空串 = 用户停用
+        fs::write(&p, "screenshot_hotkey = \n").unwrap();
+        let c = Config::read_from(&p).unwrap();
+        assert_eq!(c.screenshot_hotkey, "");
         // 空文件/损坏行回退默认值
         fs::write(&p, "# 注释\nbadline\n").unwrap();
         let c = Config::read_from(&p).unwrap();

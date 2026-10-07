@@ -160,6 +160,41 @@ pub fn decode_file_uri(uri: &str) -> Result<String, String> {
     String::from_utf8(out).map_err(|_| "URI 解码后非 UTF-8".into())
 }
 
+/// 通知文案用：取截图目录里最新的 PNG 路径（portal 的 URI 在 take
+/// 内部只用于读盘，这里从 Pictures/Screenshots 兜底推断；失败返回空）。
+pub fn latest_shot_hint() -> String {
+    let base = std::env::var("XDG_PICTURES_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+                .join("图片")
+        });
+    let dir = if base.join("Screenshots").is_dir() {
+        base.join("Screenshots")
+    } else {
+        base
+    };
+    std::fs::read_dir(&dir)
+        .ok()
+        .and_then(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|x| x.eq_ignore_ascii_case("png"))
+                })
+                .map(|e| e.path())
+                .max_by_key(|p| {
+                    p.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                })
+        })
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
