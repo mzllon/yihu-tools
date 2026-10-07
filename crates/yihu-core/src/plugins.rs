@@ -272,6 +272,50 @@ fn copy_dir(src: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
+// ---- 系统插件注册表 ----
+
+/// 进程内系统插件定义（面板内置功能单元，2026-10-07 可插拔化）。
+/// 与外部插件共用 plugins_state.json 启停状态（id 混存互不冲突），
+/// 中心「插件」页与面板共用本表；面板侧 provider 负责 payload→id 映射。
+pub struct SystemPluginDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub desc: &'static str,
+}
+
+pub const SYSTEM_PLUGINS: &[SystemPluginDef] = &[
+    SystemPluginDef {
+        id: "autodark",
+        name: "深浅色切换（AutoDark）",
+        desc: "面板搜索里的深色/浅色切换与主题页入口；定时切换本体在中心 AutoDark 页单独启停",
+    },
+    SystemPluginDef {
+        id: "radio",
+        name: "电台",
+        desc: "面板搜索里的广播页入口；播放器本体在中心应用（UI 插件化等 M5 形态决策）",
+    },
+    SystemPluginDef {
+        id: "syscmd",
+        name: "系统命令",
+        desc: "锁屏/挂起/关机/重启/清空回收站/截图/文件管理器/夜灯开关",
+    },
+    SystemPluginDef {
+        id: "webdirect",
+        name: "网页搜索直达",
+        desc: "g/b/bing/ddg 前缀搜索与裸域名直达",
+    },
+    SystemPluginDef {
+        id: "calc",
+        name: "计算器",
+        desc: "输入算式置顶结果行，回车复制",
+    },
+    SystemPluginDef {
+        id: "applinks",
+        name: "应用导航",
+        desc: "打开一呼中心",
+    },
+];
+
 // ---- 启停状态 ----
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

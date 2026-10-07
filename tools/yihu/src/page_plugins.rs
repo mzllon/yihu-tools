@@ -92,6 +92,25 @@ pub fn build_page() -> gtk::Widget {
         }
     }
 
+    // —— 卡片：系统插件（进程内功能单元，可启停）——
+    let sys_card = card();
+    let sys_title = Label::new(Some("系统插件"));
+    sys_title.add_css_class("sec-title");
+    sys_title.set_halign(Align::Start);
+    sys_card.append(&sys_title);
+    let sys_box = GtkBox::new(Orientation::Vertical, 8);
+    sys_card.append(&sys_box);
+    let sys_hint = Label::new(Some(
+        "面板进程内的功能单元：停用后从面板搜索与默认集消失（下次呼出生效）。\
+         与外部插件共用启停状态；电台/AutoDark 的页面本体仍在对应设置页。",
+    ));
+    sys_hint.add_css_class("dim-label");
+    sys_hint.add_css_class("caption-sm");
+    sys_hint.set_wrap(true);
+    sys_hint.set_halign(Align::Start);
+    sys_card.append(&sys_hint);
+    refresh_system_plugins(&sys_box);
+
     // —— 卡片：已装插件 ——
     let list_card = card();
     let list_title = Label::new(Some("已安装插件"));
@@ -116,7 +135,7 @@ pub fn build_page() -> gtk::Widget {
     main_box.set_margin_start(24);
     main_box.set_margin_end(24);
     main_box.set_valign(Align::Start);
-    for c in [&help_card, &install_card, &zip_card, &market_card, &list_card] {
+    for c in [&help_card, &install_card, &zip_card, &market_card, &sys_card, &list_card] {
         c.set_hexpand(true);
         main_box.append(c);
     }
@@ -464,4 +483,43 @@ fn card() -> GtkBox {
     b.add_css_class("card");
     b.add_css_class("card-pad");
     b
+}
+
+/// 系统插件列表（数量固定，直接重建；启停写入与外部插件同一状态文件）
+fn refresh_system_plugins(box_: &GtkBox) {
+    while let Some(child) = box_.first_child() {
+        box_.remove(&child);
+    }
+    let state = plugins::PluginsState::load();
+    for p in plugins::SYSTEM_PLUGINS {
+        let row = GtkBox::new(Orientation::Horizontal, 8);
+        let col = GtkBox::new(Orientation::Vertical, 2);
+        let t = Label::new(Some(p.name));
+        t.add_css_class("row-title");
+        t.set_halign(Align::Start);
+        let d = Label::new(Some(p.desc));
+        d.add_css_class("caption-sm");
+        d.add_css_class("dim-label");
+        d.set_halign(Align::Start);
+        d.set_wrap(true);
+        col.append(&t);
+        col.append(&d);
+        col.set_hexpand(true);
+        col.set_valign(Align::Center);
+        row.append(&col);
+
+        let sw = Switch::new();
+        sw.set_active(!state.is_disabled(p.id));
+        sw.set_valign(Align::Center);
+        {
+            let id = p.id.to_string();
+            sw.connect_active_notify(move |sw| {
+                let mut st = plugins::PluginsState::load();
+                st.set_disabled(&id, !sw.is_active());
+                let _ = st.save_to(&plugins::state_path());
+            });
+        }
+        row.append(&sw);
+        box_.append(&row);
+    }
 }

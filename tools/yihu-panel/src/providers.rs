@@ -9,6 +9,39 @@ use crate::app::PanelEntry;
 
 pub struct BuiltinProvider;
 
+// ---- 系统插件：注册表在 yihu-core（中心插件页共用），面板负责 payload→id ----
+//
+// 与外部插件同一套启停状态（plugins_state.json，id 混存互不冲突）；
+// 停用 = 从搜索结果/默认集消失，二进制仍在（内置能力的性能红线不因
+// 可插拔而破坏：进程内零开销不变）。电台/AutoDark 是第一批：搜索入口
+// 随启停出现/消失；电台播放器本体仍在中心应用（进程级外置等 M5 UI
+// 形态决策），AutoDark 定时本体有独立 timer 开关（AutoDark 设置页）。
+
+pub use yihu_core::plugins::SYSTEM_PLUGINS;
+
+/// payload 归属的系统插件 id（停用过滤用）
+pub fn owner_of(payload: &str) -> &'static str {
+    match payload {
+        "theme:dark" | "theme:light" | "page:autodark" => "autodark",
+        "page:radio" => "radio",
+        "center" => "applinks",
+        p if p.starts_with("sys:") => "syscmd",
+        p if p.starts_with("web:") => "webdirect",
+        _ => "",
+    }
+}
+
+/// 当前启用的系统插件集合（呼出时加载一次缓存进 Deps，key 路径零 IO）。
+/// plugins_state.json 里外部插件 id 与系统插件 id 混存，这里只看系统侧。
+pub fn enabled_system_plugins() -> std::collections::HashSet<String> {
+    let state = yihu_core::plugins::PluginsState::load();
+    SYSTEM_PLUGINS
+        .iter()
+        .filter(|p| !state.is_disabled(p.id))
+        .map(|p| p.id.to_string())
+        .collect()
+}
+
 impl BuiltinProvider {
     pub fn capabilities() -> Vec<PanelEntry> {
         vec![
@@ -79,7 +112,8 @@ impl BuiltinProvider {
     /// 网页搜索直达（对标 uTools 网页快开的快捷前缀）：
     /// `g 词`=Google、`b 词`=百度、`bing 词`=Bing、`ddg 词`=DuckDuckGo；
     /// 裸域名（含点、无空白）直达打开。返回 None = 走正常搜索。
-    pub fn web_direct(text: &str) -> Option<Vec<PanelEntry>> {
+    /// 系统插件「webdirect」停用时整体关闭。
+    pub fn web_direct(text: &str, enabled: &std::collections::HashSet<String>) -> Option<Vec<PanelEntry>> {
         const ENGINES: &[(&str, &str)] = &[
             ("g ", "https://www.google.com/search?q="),
             ("b ", "https://www.baidu.com/s?wd="),
@@ -87,6 +121,9 @@ impl BuiltinProvider {
             ("ddg ", "https://duckduckgo.com/?q="),
         ];
         let t = text.trim();
+        if !enabled.contains("webdirect") {
+            return None;
+        }
         let lower = t.to_lowercase();
         for (prefix, base) in ENGINES {
             if let Some(term) = lower.strip_prefix(prefix) {
@@ -122,18 +159,22 @@ impl BuiltinProvider {
 
     /// 搜索匹配：网页直达前缀优先，其余文本的每个空白分隔词都须出现在
     /// 「标题+关键字+拼音列」中（大小写无关；拼音列含全拼与首字母，
-    /// "shense"/"ds" 均可命中深色）。
-    pub fn query(text: &str) -> Vec<PanelEntry> {
+    /// "shense"/"ds" 均可命中深色）。结果按系统插件启停过滤。
+    pub fn query(text: &str, enabled: &std::collections::HashSet<String>) -> Vec<PanelEntry> {
         let t = text.trim().to_lowercase();
         if t.is_empty() {
-            return Self::capabilities();
+            return Self::capabilities()
+                .into_iter()
+                .filter(|e| enabled.contains(owner_of(&e.payload)))
+                .collect();
         }
-        if let Some(rows) = Self::web_direct(text) {
+        if let Some(rows) = Self::web_direct(text, enabled) {
             return rows;
         }
         Self::capabilities()
             .into_iter()
             .chain(Self::system_commands())
+            .filter(|e| enabled.contains(owner_of(&e.payload)))
             .filter(|e| {
                 let hay = format!(
                     "{} {} {}",
@@ -293,16 +334,21 @@ fn spawn_detached(program: &PathBuf, args: &[&str]) {
 #[cfg(test)]
 mod pinyin_tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn all_enabled() -> HashSet<String> {
+        SYSTEM_PLUGINS.iter().map(|p| p.id.to_string()).collect()
+    }
 
     #[test]
     fn pinyin_hits_capabilities() {
-        assert!(BuiltinProvider::query("shense")
+        assert!(BuiltinProvider::query("shense", &all_enabled())
             .iter()
             .any(|e| e.payload == "theme:dark"), "全拼命中深色");
-        assert!(BuiltinProvider::query("qianse")
+        assert!(BuiltinProvider::query("qianse", &all_enabled())
             .iter()
             .any(|e| e.payload == "theme:light"), "全拼命中浅色");
-        assert!(BuiltinProvider::query("zhuti")
+        assert!(BuiltinProvider::query("zhuti", &all_enabled())
             .iter()
             .any(|e| e.payload == "page:autodark"), "全拼命中主题");
     }
@@ -311,50 +357,59 @@ mod pinyin_tests {
 #[cfg(test)]
 mod direct_tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn all_enabled() -> HashSet<String> {
+        SYSTEM_PLUGINS.iter().map(|p| p.id.to_string()).collect()
+    }
+
+    fn without(id: &str) -> HashSet<String> {
+        all_enabled().into_iter().filter(|x| x != id).collect()
+    }
 
     #[test]
     fn web_search_prefixes() {
-        let rows = BuiltinProvider::web_direct("g rust lang").unwrap();
+        let rows = BuiltinProvider::web_direct("g rust lang", &all_enabled()).unwrap();
         assert_eq!(rows[0].payload, "web:https://www.google.com/search?q=rust%20lang");
-        let rows = BuiltinProvider::web_direct("b 中文搜索").unwrap();
+        let rows = BuiltinProvider::web_direct("b 中文搜索", &all_enabled()).unwrap();
         assert!(
             rows[0].payload.contains("baidu.com/s?wd=%E4%B8%AD%E6%96%87%E6%90%9C%E7%B4%A2"),
             "{}",
             rows[0].payload
         );
-        assert!(BuiltinProvider::web_direct("bing news").is_some());
+        assert!(BuiltinProvider::web_direct("bing news", &all_enabled()).is_some());
         // 空词不触发（还想搜应用）
-        assert!(BuiltinProvider::web_direct("g ").is_none());
-        assert!(BuiltinProvider::web_direct("b").is_none());
+        assert!(BuiltinProvider::web_direct("g ", &all_enabled()).is_none());
+        assert!(BuiltinProvider::web_direct("b", &all_enabled()).is_none());
     }
 
     #[test]
     fn bare_domain_direct() {
-        let rows = BuiltinProvider::web_direct("github.com").unwrap();
+        let rows = BuiltinProvider::web_direct("github.com", &all_enabled()).unwrap();
         assert_eq!(rows[0].payload, "web:https://github.com");
-        let rows = BuiltinProvider::web_direct("docs.rust-lang.org").unwrap();
+        let rows = BuiltinProvider::web_direct("docs.rust-lang.org", &all_enabled()).unwrap();
         assert!(rows[0].payload.starts_with("web:https://docs.rust-lang.org"));
         // 非域名形态 / 非常见 TLD 不触发（回落正常搜索）
-        assert!(BuiltinProvider::web_direct("settings.ini").is_none());
-        assert!(BuiltinProvider::web_direct("a..b").is_none());
-        assert!(BuiltinProvider::web_direct("make.coffee").is_none());
+        assert!(BuiltinProvider::web_direct("settings.ini", &all_enabled()).is_none());
+        assert!(BuiltinProvider::web_direct("a..b", &all_enabled()).is_none());
+        assert!(BuiltinProvider::web_direct("make.coffee", &all_enabled()).is_none());
     }
 
     #[test]
     fn system_commands_query_and_pinyin() {
         let all = BuiltinProvider::system_commands();
         assert_eq!(all.len(), 8);
-        assert!(BuiltinProvider::query("suoding")
+        assert!(BuiltinProvider::query("suoding", &all_enabled())
             .iter()
             .any(|e| e.payload == "sys:lock"), "拼音命中锁屏");
-        assert!(BuiltinProvider::query("sdpm")
+        assert!(BuiltinProvider::query("sdpm", &all_enabled())
             .iter()
             .any(|e| e.payload == "sys:lock"), "首字母命中锁屏");
-        assert!(BuiltinProvider::query("trash")
+        assert!(BuiltinProvider::query("trash", &all_enabled())
             .iter()
             .any(|e| e.payload == "sys:empty-trash"), "英文命中回收站");
         // 正常应用搜索不被系统命令挤掉：纯中文词不误触
-        assert!(BuiltinProvider::query("shense").iter().any(|e| e.payload == "theme:dark"));
+        assert!(BuiltinProvider::query("shense", &all_enabled()).iter().any(|e| e.payload == "theme:dark"));
     }
 
     #[test]
@@ -371,5 +426,66 @@ mod direct_tests {
         assert!(!looks_like_domain("a-.com"));
         assert!(!looks_like_domain("a.b1")); // 尾段含数字
         assert!(!looks_like_domain("a.b")); // 尾段过短
+    }
+}
+
+#[cfg(test)]
+mod pluggable_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn all_enabled() -> HashSet<String> {
+        SYSTEM_PLUGINS.iter().map(|p| p.id.to_string()).collect()
+    }
+
+    fn without(id: &str) -> HashSet<String> {
+        all_enabled().into_iter().filter(|x| x != id).collect()
+    }
+
+    #[test]
+    fn registry_shape_and_owners() {
+        assert!(SYSTEM_PLUGINS.len() >= 6);
+        for p in SYSTEM_PLUGINS {
+            assert!(!p.name.is_empty() && !p.desc.is_empty(), "{} 缺名称/描述", p.id);
+        }
+        assert_eq!(owner_of("theme:dark"), "autodark");
+        assert_eq!(owner_of("page:radio"), "radio");
+        assert_eq!(owner_of("sys:lock"), "syscmd");
+        assert_eq!(owner_of("web:https://x"), "webdirect");
+        assert_eq!(owner_of("center"), "applinks");
+        assert_eq!(owner_of("unknown"), "");
+    }
+
+    #[test]
+    fn disable_autodark_hides_theme_but_keeps_syscmd() {
+        let enabled = without("autodark");
+        let rows = BuiltinProvider::query("shense", &enabled);
+        assert!(rows.is_empty(), "停用 AutoDark 后深色不得命中: {rows:?}");
+        let rows = BuiltinProvider::query("suoding", &enabled);
+        assert!(rows.iter().any(|e| e.payload == "sys:lock"));
+        // 电台/AutoDark 各自独立：停 radio 不影响 autodark
+        let rows = BuiltinProvider::query("广播", &without("radio"));
+        assert!(rows.is_empty());
+        let rows = BuiltinProvider::query("深色", &without("radio"));
+        assert!(rows.iter().any(|e| e.payload == "theme:dark"));
+    }
+
+    #[test]
+    fn disable_webdirect_kills_prefix_and_domain() {
+        let enabled = without("webdirect");
+        assert!(BuiltinProvider::web_direct("g rust", &enabled).is_none());
+        assert!(BuiltinProvider::web_direct("github.com", &enabled).is_none());
+        // 其它系统插件不受影响
+        assert!(BuiltinProvider::query("suoding", &enabled)
+            .iter()
+            .any(|e| e.payload == "sys:lock"));
+    }
+
+    #[test]
+    fn empty_query_respects_enabled() {
+        let rows = BuiltinProvider::query("", &without("autodark"));
+        assert!(!rows.iter().any(|e| e.payload == "theme:dark"));
+        let rows = BuiltinProvider::query("", &all_enabled());
+        assert!(rows.iter().any(|e| e.payload == "theme:dark"));
     }
 }

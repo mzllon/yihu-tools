@@ -58,6 +58,8 @@ struct Deps {
     audit: Rc<yihu_core::audit::Audit>,
     /// 应用列表热刷新槽：AppInfoMonitor 触发后台重扫，结果经此回主循环
     app_refresh: Arc<Mutex<Option<Vec<PanelEntry>>>>,
+    /// 系统插件启用集（呼出时加载缓存；key 路径零 IO，中心页改开关下次呼出生效）
+    sys_plugins: Rc<RefCell<std::collections::HashSet<String>>>,
 }
 
 /// 当前面板窗口及其专属控件（每次呼出重建一份）
@@ -102,11 +104,17 @@ pub fn run_daemon() {
         load_css();
 
         let history = Rc::new(RefCell::new(yihu_core::panel::History::load()));
+        // 系统插件启用集：启动时加载一次（启动路径 IO 合法），呼出时刷新
+        let sys_plugins = Rc::new(RefCell::new(providers::enabled_system_plugins()));
         let caps = providers::BuiltinProvider::capabilities();
         let apps = collect_apps();
-        // 条目全集 = 内置能力 + 应用（供默认集「最近」回查）；nucleo 只匹配应用
+        // 条目全集 = 内置能力（按启停过滤）+ 应用（供默认集「最近」回查）；nucleo 只匹配应用
         let entries = Rc::new(RefCell::new({
-            let mut v = caps.clone();
+            let mut v: Vec<PanelEntry> = caps
+                .iter()
+                .filter(|e| sys_plugins.borrow().contains(providers::owner_of(&e.payload)))
+                .cloned()
+                .collect();
             v.extend(apps.clone());
             v
         }));
@@ -130,6 +138,7 @@ pub fn run_daemon() {
             fade_tx: tx.clone(),
             audit,
             app_refresh: app_refresh.clone(),
+            sys_plugins: sys_plugins.clone(),
         });
 
         // —— 应用列表热刷新（AppInfoMonitor，穿插小项）——
@@ -172,7 +181,13 @@ pub fn run_daemon() {
                 // 应用列表热刷新消费：后台重扫完成 → 主循环重建（不阻塞）
                 if let Some(new_apps) = deps.app_refresh.lock().unwrap().take() {
                     let caps = providers::BuiltinProvider::capabilities();
-                    let mut all = caps.clone();
+                    let mut all: Vec<PanelEntry> = caps
+                        .iter()
+                        .filter(|e| {
+                            deps.sys_plugins.borrow().contains(providers::owner_of(&e.payload))
+                        })
+                        .cloned()
+                        .collect();
                     all.extend(new_apps.iter().cloned());
                     *deps.entries.borrow_mut() = all;
                     *deps.nuc.borrow_mut() = build_nucleo(&new_apps);
@@ -247,6 +262,10 @@ pub fn run_bench() {
     let t_apps = t0.elapsed();
     let mut entries = providers::BuiltinProvider::capabilities();
     entries.extend(apps.clone());
+    let enabled: std::collections::HashSet<String> = providers::SYSTEM_PLUGINS
+        .iter()
+        .map(|p| p.id.to_string())
+        .collect();
     let total = entries.len();
     let mut nuc = build_nucleo(&entries);
     settle(&mut nuc);
@@ -269,6 +288,7 @@ pub fn run_bench() {
         let t = Instant::now();
         settle(&mut nuc);
         let snap = nuc.snapshot();
+        let _ = &enabled;
         let samples: Vec<String> = snap
             .matched_items(0..3.min(snap.matched_item_count()))
             .map(|it| it.data.title.clone())
@@ -287,6 +307,9 @@ pub fn run_bench() {
 fn summon(deps: &Rc<Deps>, slot: &Slot) {
     dispose(slot);
     deps.plugins.borrow_mut().ensure_sessions();
+    // 系统插件启停可能有变化（中心页改的）：呼出时刷新缓存
+    //（此处本就有注册表扫描 IO，多一次状态文件读无新增红线压力）
+    *deps.sys_plugins.borrow_mut() = providers::enabled_system_plugins();
     let ui = build_panel_ui(deps, slot);
     *slot.borrow_mut() = Some(ui);
     let (win, entry) = {
@@ -407,9 +430,14 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
         let calc_row = deps.calc_row.clone();
         let plugins = deps.plugins.clone();
         let dirty = deps.dirty.clone();
+        let sys = deps.sys_plugins.clone();
         entry.connect_search_changed(move |e| {
             let text = e.text().to_string();
-            *calc_row.borrow_mut() = calc_entry(&text);
+            *calc_row.borrow_mut() = if sys.borrow().contains("calc") {
+                calc_entry(&text)
+            } else {
+                None
+            };
             *query.borrow_mut() = text;
             {
                 let mut nuc = nuc.borrow_mut();
@@ -478,8 +506,9 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
                         rows.push(it.data.clone());
                     }
                 }
-                // 内置能力 + 插件结果（同受 MAX_SHOWN 约束）
-                for e in providers::BuiltinProvider::query(&q) {
+                // 内置能力（按系统插件启停过滤）+ 插件结果（同受 MAX_SHOWN 约束）
+                let enabled = deps_cap.sys_plugins.borrow().clone();
+                for e in providers::BuiltinProvider::query(&q, &enabled) {
                     if rows.len() >= MAX_SHOWN {
                         break;
                     }
@@ -927,6 +956,9 @@ fn chip_buttons(deps: &Rc<Deps>, slot: &Slot) -> Vec<gtk::Button> {
     ];
     CHIPS
         .iter()
+        .filter(|(payload, _, _)| {
+            deps.sys_plugins.borrow().contains(providers::owner_of(payload))
+        })
         .map(|(payload, label, icon)| {
             let b = gtk::Button::new();
             b.add_css_class("panel-chip");
