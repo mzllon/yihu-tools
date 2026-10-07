@@ -10,7 +10,7 @@
 //! 「读线程已见 EOF / kill_all 同约定」的有界路径上调用。
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -22,6 +22,11 @@ use crate::app::PanelEntry;
 
 const MAX_FAILURES: usize = 4;
 const FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// 插件输出单行上限：超限视为协议违约，断开会话（审查 M-2，
+/// 读线程内存必须有界）。results 条数上限同理 1000（parse_line）。
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+/// 单次 drain 最多处理的能力请求数（审查 M-1：洪水在多 tick 间分摊）
+const MAX_CAPS_PER_DRAIN: usize = 64;
 /// 常驻会话空闲自退阈值（M4 冻结决策 #7：socket-activation 列 M5，
 /// v1 = 收起不杀 + 空闲发 shutdown 自退）
 pub const RESIDENT_IDLE_EXIT: Duration = Duration::from_secs(300);
@@ -193,17 +198,26 @@ impl PluginMgr {
         let tx = self.tx.clone();
         let reader_id = id.clone();
         std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(l) => {
-                        if let Some(ev) = parse_line(&reader_id, gen, &l) {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut buf = Vec::with_capacity(512);
+                // 行长硬上限：take 限流读入，超限断开会话（Exited → 计失败）
+                let mut limited = (&mut reader).take((MAX_LINE_BYTES + 1) as u64);
+                match limited.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) if n > MAX_LINE_BYTES => {
+                        eprintln!("yihu-panel: 插件 {reader_id} 单行超限（>1 MiB），断开会话");
+                        break;
+                    }
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf);
+                        let line = line.trim_end_matches(['\n', '\r']);
+                        if let Some(ev) = parse_line(&reader_id, gen, line) {
                             if tx.send(ev).is_err() {
                                 break;
                             }
                         }
                     }
-                    Err(_) => break,
                 }
             }
             let _ = tx.send(PluginEvent::Exited { plugin: reader_id, gen });
@@ -220,13 +234,26 @@ impl PluginMgr {
         })
     }
 
-    /// 查询某插件会话声明的能力集（会话不存在 = None，请求无从发起）。
+    /// 查询某插件会话声明的能力集（按 id 模糊；能力路径一律走
+    /// permissions_of_gen 精确配对，此方法留作调试）
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn permissions_of(&self, plugin: &str) -> Option<&HashSet<String>> {
         self.sessions.iter().find(|s| s.id == plugin).map(|s| &s.permissions)
     }
 
-    /// 回复能力请求（capability_response）。会话已死则静默丢弃。
-    pub fn respond(&mut self, plugin: &str, request_id: u64, ok: bool, error: &str) {
+    /// 同上，按 (id, gen) 精确配对（BUG-001 教训：旧代的迟到请求不得
+    /// 借新一代会话的身份被执行/回复）。
+    pub fn permissions_of_gen(&self, plugin: &str, gen: u64) -> Option<&HashSet<String>> {
+        self.sessions
+            .iter()
+            .find(|s| s.id == plugin && s.gen == gen)
+            .map(|s| &s.permissions)
+    }
+
+    /// 回复能力请求（capability_response），按 (id, gen) 精确投递：
+    /// 旧代会话的迟到请求只丢弃、不回复（回复错位会让新代插件的
+    /// pending 表错乱）。会话已死或代数不符则静默丢弃。
+    pub fn respond_gen(&mut self, plugin: &str, gen: u64, request_id: u64, ok: bool, error: &str) {
         let line = if ok {
             format!("{{\"type\":\"capability_response\",\"id\":{request_id},\"ok\":true}}")
         } else {
@@ -235,7 +262,16 @@ impl PluginMgr {
                 serde_json::to_string(error).unwrap_or_else(|_| "\"\"".into())
             )
         };
-        self.send_all_to(plugin, &line);
+        for s in &mut self.sessions {
+            if s.id != plugin || s.gen != gen {
+                continue;
+            }
+            s.last_used = Instant::now();
+            let _ = s.stdin.write_all(line.as_bytes());
+            let _ = s.stdin.write_all(b"\n");
+            let _ = s.stdin.flush();
+            return;
+        }
     }
 
     /// 注入选中文件上下文（app.rs 已净化：≤64 项、单项 ≤4KiB）
@@ -368,6 +404,12 @@ impl PluginMgr {
         self.sessions.iter().any(|s| s.id == plugin)
     }
 
+    /// 会话当前代数（测试/调试用）
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn session_gen(&self, plugin: &str) -> Option<u64> {
+        self.sessions.iter().find(|s| s.id == plugin).map(|s| s.gen)
+    }
+
     /// 某插件当前滑动窗口内的失败计数（同上）
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn failures_of(&self, plugin: &str) -> usize {
@@ -399,7 +441,12 @@ impl PluginMgr {
                         dirty = true;
                     }
                 }
-                Ok(PluginEvent::Capability(cap)) => caps.push(cap),
+                Ok(PluginEvent::Capability(cap)) => {
+                    caps.push(cap);
+                    if caps.len() >= MAX_CAPS_PER_DRAIN {
+                        break; // 洪水分摊到多 tick（审查 M-1）
+                    }
+                }
                 Ok(PluginEvent::Exited { plugin, gen }) => {
                     // 只有 (id, gen) 都匹配才认账：旧代（已收起会话）的迟到
                     // 退出事件直接丢弃，否则按 id 会误配新一代活会话，
@@ -480,12 +527,17 @@ impl PluginMgr {
         if self.recent_failures(plugin) >= MAX_FAILURES {
             self.disabled_by_failures.insert(plugin.to_string());
             eprintln!("yihu-panel: 插件 {plugin} 在 5 分钟内失败 {MAX_FAILURES} 次，本次运行期禁用");
-            // M4 穿插项：落盘持久禁用（重启后仍禁用；中心「插件」页开关可恢复）
-            let mut st = yihu_core::plugins::PluginsState::load();
-            st.set_disabled(plugin, true);
-            if let Err(e) = st.save_to(&yihu_core::plugins::state_path()) {
-                eprintln!("yihu-panel: 崩溃禁用落盘失败：{e}");
-            }
+            // M4 穿插项：落盘持久禁用（重启后仍禁用；中心「插件」页开关可恢复）。
+            // 落盘必须后台线程——本函数在主循环回调链上（tick/keystroke），
+            // 同步 IO 违反硬性规则 #1（审查 I-2）。
+            let p = plugin.to_string();
+            std::thread::spawn(move || {
+                let mut st = yihu_core::plugins::PluginsState::load();
+                st.set_disabled(&p, true);
+                if let Err(e) = st.save_to(&yihu_core::plugins::state_path()) {
+                    eprintln!("yihu-panel: 崩溃禁用落盘失败：{e}");
+                }
+            });
         }
     }
 }
@@ -525,6 +577,7 @@ fn parse_line(plugin: &str, gen: u64, line: &str) -> Option<PluginEvent> {
             let items = msg
                 .items
                 .into_iter()
+                .take(1000) // 单条 results 行条数上限（审查 M-1）
                 .map(|i| PanelEntry {
                     title: i.title,
                     subtitle: i.subtitle,
@@ -641,6 +694,38 @@ for line in sys.stdin:
             .unwrap_or(false)
     }
 
+    #[test]
+    fn oversized_line_kills_session() {
+        if !crate::sandbox::available() || !python3_available() {
+            eprintln!("跳过：缺 bwrap 或 python3");
+            return;
+        }
+        // 独立注册表：插件收到 "huge" 后回一条 2 MiB 的行
+        let base = std::env::temp_dir().join(format!("yihu-sess-huge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        make_registry(&base);
+        let py = base.join("fake-plugin/plugin.py");
+        let mut src = std::fs::read_to_string(&py).unwrap();
+        src = src.replace(
+            "        if text == \"files\":",
+            "        if text == \"huge\":\n            send({\"type\": \"results\", \"query_id\": m[\"id\"],\n                  \"items\": [{\"title\": \"x\" * (2 * 1024 * 1024), \"payload\": \"p\"}]})\n            continue\n        if text == \"files\":",
+        );
+        std::fs::write(&py, src).unwrap();
+
+        let mut mgr = PluginMgr::new();
+        mgr.ensure_sessions_in(&base, &base);
+        mgr.broadcast("huge");
+        wait_for(&mut mgr, Duration::from_secs(10), |m, _| {
+            !m.is_session_alive("fake-plugin")
+        });
+        assert!(
+            mgr.failures_of("fake-plugin") >= 1,
+            "超长行 = 协议违约，应计失败"
+        );
+        mgr.kill_all();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// fake-plugin：声明 clipboard.write + selected_files.read；
     /// plain-plugin：零权限 + 常驻（验证 context 门控、能力拒绝与
     /// resident 空闲自退）
@@ -707,13 +792,24 @@ for line in sys.stdin:
         let mut mgr = PluginMgr::new();
         mgr.ensure_sessions_in(&base, &base);
 
-        // ① 未声明能力（notify）→ 拒绝回环：deny 文案原样回给插件
+        // ① 未声明能力（notify）→ 拒绝回环：deny 文案原样回给插件。
+        //    先用错代 gen 回复（应被拒收、无结果到达），再正确代回复。
         mgr.broadcast("notify");
         let caps = wait_for(&mut mgr, Duration::from_secs(10), |_, c| !c.is_empty());
         assert_eq!(caps[0].capability, "notify");
         assert!(caps[0].gen > 0);
-        let req1 = (caps[0].plugin.clone(), caps[0].request_id);
-        mgr.respond(&req1.0, req1.1, false, "manifest 未声明能力 notify");
+        let req1 = (caps[0].plugin.clone(), caps[0].gen, caps[0].request_id);
+        mgr.respond_gen(&req1.0, req1.1 + 100, req1.2, false, "错代回复不应被投递");
+        let deadline = Instant::now() + Duration::from_millis(800);
+        while Instant::now() < deadline {
+            mgr.drain();
+            assert!(
+                !mgr.latest_rows().iter().any(|r| r.title.starts_with("denied:")),
+                "错代回复到达了——(id, gen) 配对失效（审查 I-1）"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        mgr.respond_gen(&req1.0, req1.1, req1.2, false, "manifest 未声明能力 notify");
         wait_for(&mut mgr, Duration::from_secs(10), |m, _| {
             m.latest_rows().iter().any(|r| r.title.starts_with("denied:manifest 未声明能力 notify"))
         });
@@ -722,7 +818,7 @@ for line in sys.stdin:
         mgr.broadcast("copy");
         let caps = wait_for(&mut mgr, Duration::from_secs(10), |_, c| !c.is_empty());
         assert_eq!(caps[0].capability, "clipboard.write");
-        mgr.respond(&caps[0].plugin, caps[0].request_id, true, "");
+        mgr.respond_gen(&caps[0].plugin, caps[0].gen, caps[0].request_id, true, "");
         wait_for(&mut mgr, Duration::from_secs(10), |m, _| {
             m.latest_rows().iter().any(|r| r.title == "granted")
         });
@@ -735,6 +831,10 @@ for line in sys.stdin:
             let titles: Vec<String> = m.latest_rows().iter().map(|r| r.title.clone()).collect();
             titles.contains(&"files:2".to_string()) && titles.contains(&"files:0".to_string())
         });
+        // 权限表按 (id, gen) 可查且与 manifest 一致
+        let gen = mgr.session_gen("fake-plugin").expect("会话在");
+        assert!(mgr.permissions_of_gen("fake-plugin", gen).unwrap().contains("clipboard.write"));
+        assert!(!mgr.permissions_of_gen("fake-plugin", gen).unwrap().contains("notify"));
         // ⑤ 常驻（resident）：kill_all 后 plain-plugin 存活、fake-plugin
         //    已死；空闲超阈值立即 shutdown → 插件 exit(0) 自退且不计失败
         mgr.kill_all();

@@ -639,13 +639,19 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
 
 /// 能力请求处理：授权（manifest 声明 + 参数校验）→ 执行 → 回复 + 审计。
 /// 授权失败/执行失败都以 ok:false 回复，插件据此降级。
+/// (id, gen) 精确配对：旧代会话的迟到请求只审计丢弃，不借新代执行
+/// （BUG-001 同源教训）。
 fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
     let declared = deps
         .plugins
         .borrow()
-        .permissions_of(&req.plugin)
-        .cloned()
-        .unwrap_or_default();
+        .permissions_of_gen(&req.plugin, req.gen)
+        .cloned();
+    let Some(declared) = declared else {
+        deps.audit
+            .record(&req.plugin, req.gen, &req.capability, "stale", "会话已换代，迟到请求丢弃");
+        return;
+    };
     let outcome = match crate::caps::evaluate(&declared, &req.capability, &req.params) {
         Ok(action) => execute_capability(action),
         Err(e) => Err(e),
@@ -654,14 +660,14 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
         Ok(()) => {
             deps.plugins
                 .borrow_mut()
-                .respond(&req.plugin, req.request_id, true, "");
+                .respond_gen(&req.plugin, req.gen, req.request_id, true, "");
             deps.audit
                 .record(&req.plugin, req.gen, &req.capability, "grant", "");
         }
         Err(e) => {
             deps.plugins
                 .borrow_mut()
-                .respond(&req.plugin, req.request_id, false, &e);
+                .respond_gen(&req.plugin, req.gen, req.request_id, false, &e);
             deps.audit
                 .record(&req.plugin, req.gen, &req.capability, "deny", &e);
         }

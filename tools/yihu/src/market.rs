@@ -100,6 +100,17 @@ pub fn download_to(url: &str, dest: &Path) -> Result<u64, String> {
 pub const DEFAULT_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/mzllon/yihu-market/main/registry.json";
 
+/// 市场条目声明权限与包内 manifest 声明权限是否一致（集合相等，序无关）。
+/// 「安装时权限明示 = 授权时点」依赖它闭环：registry 展示面必须与
+/// 实际生效面一致，不一致 = 拒装（审查 I-3）。
+pub fn permissions_match(declared: &[String], manifest: &[String]) -> bool {
+    let mut a: Vec<&str> = declared.iter().map(|s| s.as_str()).collect();
+    let mut b: Vec<&str> = manifest.iter().map(|s| s.as_str()).collect();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +139,15 @@ mod tests {
         assert!(parse_registry(garbage).unwrap_err().contains("解析失败"));
         let empty = "{}";
         assert!(parse_registry(empty).unwrap().is_empty());
+    }
+
+    #[test]
+    fn permissions_match_is_set_equality() {
+        let s = |v: &[&str]| -> Vec<String> { v.iter().map(|x| x.to_string()).collect() };
+        assert!(permissions_match(&s(&["a", "b"]), &s(&["b", "a"])));
+        assert!(permissions_match(&s(&[]), &s(&[])));
+        assert!(!permissions_match(&s(&[]), &s(&["clipboard.write"])));
+        assert!(!permissions_match(&s(&["a"]), &s(&["a", "b"])));
+        assert!(!permissions_match(&s(&["a", "a"]), &s(&["a"])));
     }
 }

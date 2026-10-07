@@ -427,8 +427,18 @@ fn install_market_plugin(ui: &Rc<Ui>, p: MarketPlugin) {
             if p.size > 0 && n != p.size {
                 return Err(format!("体积不符：期望 {} 字节，实际 {n}", p.size));
             }
-            yihu_core::zipfile::install_from_zip_verified(&tmp, &p.sha256, &p.url)
-                .map(|m| format!("已安装：{}（{}）", m.name, m.id))
+            let m = yihu_core::zipfile::install_from_zip_verified(&tmp, &p.sha256, &p.url)?;
+            // 授权时点闭环（审查 I-3）：包内实际权限必须与市场条目展示
+            // 权限一致，否则回滚已安装内容并拒装
+            if !market::permissions_match(&p.permissions, &m.permissions) {
+                let _ = yihu_core::plugins::remove_plugin(&m.id);
+                return Err(format!(
+                    "安全拒绝：包内权限（{}）与市场条目声明（{}）不符",
+                    if m.permissions.is_empty() { "无".to_string() } else { m.permissions.join("、") },
+                    if p.permissions.is_empty() { "无".to_string() } else { p.permissions.join("、") },
+                ));
+            }
+            Ok(format!("已安装：{}（{}）", m.name, m.id))
         })();
         let _ = std::fs::remove_file(&tmp);
         *slot2.lock().unwrap() = Some(match res {

@@ -173,6 +173,15 @@ pub fn list_installed_in(base: &Path) -> (Vec<Installed>, Vec<String>) {
         if !dir.is_dir() {
             continue;
         }
+        // 点开头目录不是插件：安装崩溃残留的 .staging-* 不得被当作
+        // 可运行插件列出（审查 M-7 升级修复）
+        if dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.'))
+        {
+            continue;
+        }
         let manifest_path = dir.join("manifest.toml");
         let Ok(text) = fs::read_to_string(&manifest_path) else {
             continue; // 无 manifest 的目录（如残留空目录）忽略
@@ -410,6 +419,23 @@ permissions = ["clipboard.write", "open_uri"]
         let text = serde_json::to_string(&st).unwrap();
         let back: PluginsState = serde_json::from_str(&text).unwrap();
         assert!(back.is_disabled("a") && !back.is_disabled("b"));
+    }
+
+    #[test]
+    fn skips_dot_directories() {
+        // 安装崩溃残留的 .staging-* 含合法 manifest 也不得被当作插件（M-7）
+        let base = std::env::temp_dir().join(format!("yihu-core-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let staging = base.join(".staging-999");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(
+            staging.join("manifest.toml"),
+            "id = \"ghost\"\nname = \"x\"\napi = \"^1\"\nentry = \"x\"\n",
+        )
+        .unwrap();
+        let (installed, errors) = list_installed_in(&base);
+        assert!(installed.is_empty() && errors.is_empty());
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
