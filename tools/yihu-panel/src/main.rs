@@ -7,6 +7,7 @@
 mod app;
 mod caps;
 mod calc;
+mod pinyin_index;
 mod providers;
 mod sandbox;
 mod sessions;

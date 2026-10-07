@@ -827,11 +827,32 @@ fn gicon_for_spec(spec: &str) -> gio::Icon {
 
 fn build_nucleo(entries: &[PanelEntry]) -> nucleo::Nucleo<PanelEntry> {
     let notify: Arc<dyn Fn() + Sync + Send> = Arc::new(|| {});
+    // 单列 haystack = 标题 + 拼音/首字母 + 英文 id 尾段（uTools 式拼音
+    // 搜索：输入 "wjgl" 命中「文件管理」、"nautilus" 命中英文 id）。
+    // 注：nucleo 的 MultiPattern 是「各列全部须命中」（AND），做不了
+    // 任一列命中，所以拼音必须并进同一列而不是开第二列。
     let nuc = nucleo::Nucleo::new(nucleo::Config::DEFAULT, notify, Some(2), 1);
     let inj = nuc.injector();
     for e in entries {
         let e = e.clone();
-        inj.push(e, |item, cols| cols[0] = item.title.as_str().into());
+        inj.push(e, |item, cols| {
+            let mut col = String::with_capacity(item.title.len() * 4);
+            col.push_str(&item.title);
+            col.push(' ');
+            col.push_str(&crate::pinyin_index::match_column(&item.title));
+            let t = item.payload.trim_end_matches(".desktop");
+            let tail = t.rsplit('.').next().unwrap_or(t);
+            // 只收纯 ASCII 标识尾段，能力 payload（theme:dark 等）不含冒号进来
+            if tail.len() > 1
+                && tail
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                col.push(' ');
+                col.push_str(&tail.to_ascii_lowercase());
+            }
+            cols[0] = col.into();
+        });
     }
     nuc
 }
@@ -1220,5 +1241,63 @@ fn load_css() {
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+    }
+}
+
+#[cfg(test)]
+mod pinyin_search_tests {
+    use super::*;
+
+    fn entry(title: &str, payload: &str) -> PanelEntry {
+        PanelEntry {
+            title: title.to_string(),
+            subtitle: "应用".into(),
+            icon_spec: String::new(),
+            kind: "app",
+            payload: payload.to_string(),
+        }
+    }
+
+    fn search(entries: &[PanelEntry], q: &str) -> Vec<String> {
+        let mut nuc = build_nucleo(entries);
+        settle(&mut nuc);
+        settle(&mut nuc);
+        nuc.pattern.reparse(
+            0,
+            q,
+            nucleo::pattern::CaseMatching::Smart,
+            nucleo::pattern::Normalization::Smart,
+            false,
+        );
+        settle(&mut nuc);
+        settle(&mut nuc);
+        let snap = nuc.snapshot();
+        snap.matched_items(..)
+            .map(|it| it.data.title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn pinyin_full_and_initials_hit() {
+        let entries = vec![entry("文件管理", "org.gnome.Nautilus.desktop")];
+        let titles = search(&entries, "wenjian");
+        assert_eq!(titles, vec!["文件管理"], "全拼命中");
+        let titles = search(&entries, "wjgl");
+        assert_eq!(titles, vec!["文件管理"], "首字母命中");
+    }
+
+    #[test]
+    fn english_id_tail_hits() {
+        let entries = vec![entry("文件", "org.gnome.Nautilus.desktop")];
+        assert_eq!(search(&entries, "nautilus"), vec!["文件"], "英文 id 尾段命中");
+        // 能力 payload 不进匹配列（冒号被过滤）
+        let caps = vec![entry("切换主题", "theme:dark")];
+        assert!(search(&caps, "theme").is_empty());
+    }
+
+    #[test]
+    fn title_column_still_works() {
+        let entries = vec![entry("文本编辑器", "org.gnome.TextEditor.desktop")];
+        assert_eq!(search(&entries, "编辑"), vec!["文本编辑器"]);
     }
 }

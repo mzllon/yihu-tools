@@ -50,7 +50,8 @@ impl BuiltinProvider {
         ]
     }
 
-    /// 搜索匹配：文本的每个空白分隔词都须出现在「标题+关键字」中（大小写无关）。
+    /// 搜索匹配：文本的每个空白分隔词都须出现在「标题+关键字+拼音列」中
+    ///（大小写无关；拼音列含全拼与首字母，"shense"/"ds" 均可命中深色）。
     pub fn query(text: &str) -> Vec<PanelEntry> {
         let t = text.trim().to_lowercase();
         if t.is_empty() {
@@ -60,7 +61,7 @@ impl BuiltinProvider {
             .into_iter()
             .filter(|e| {
                 let hay = format!(
-                    "{} {}",
+                    "{} {} {}",
                     e.title,
                     match e.payload.as_str() {
                         "theme:dark" => "深色 dark",
@@ -69,7 +70,8 @@ impl BuiltinProvider {
                         "page:radio" => "广播 radio",
                         "page:autodark" => "主题 theme",
                         _ => "",
-                    }
+                    },
+                    crate::pinyin_index::match_column(&e.title),
                 )
                 .to_lowercase();
                 t.split_whitespace().all(|tok| hay.contains(tok))
@@ -111,5 +113,23 @@ fn spawn_detached(program: &PathBuf, args: &[&str]) {
         .spawn()
     {
         eprintln!("yihu-panel: 启动 {} 失败：{e}", program.display());
+    }
+}
+
+#[cfg(test)]
+mod pinyin_tests {
+    use super::*;
+
+    #[test]
+    fn pinyin_hits_capabilities() {
+        assert!(BuiltinProvider::query("shense")
+            .iter()
+            .any(|e| e.payload == "theme:dark"), "全拼命中深色");
+        assert!(BuiltinProvider::query("qianse")
+            .iter()
+            .any(|e| e.payload == "theme:light"), "全拼命中浅色");
+        assert!(BuiltinProvider::query("zhuti")
+            .iter()
+            .any(|e| e.payload == "page:autodark"), "全拼命中主题");
     }
 }
