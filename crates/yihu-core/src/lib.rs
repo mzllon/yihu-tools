@@ -11,6 +11,7 @@ pub mod paths;
 pub mod permissions;
 pub mod plugins;
 pub mod sun;
+pub mod zipfile;
 
 use serde::Serialize;
 use std::ffi::CString;

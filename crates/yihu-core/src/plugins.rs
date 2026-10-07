@@ -213,6 +213,8 @@ pub fn install_from_dir(src: &Path) -> io::Result<Manifest> {
         let _ = fs::set_permissions(&f, fs::Permissions::from_mode(0o644));
     }
     let _ = fs::set_permissions(dest.join(&manifest.entry), fs::Permissions::from_mode(0o755));
+    // 安装收据（M4 来源可追溯）：目录安装无包哈希，sha256 留空
+    let _ = crate::zipfile::write_receipt(&data_home(), &manifest.id, "dir", "", &manifest);
     Ok(manifest)
 }
 

@@ -1,7 +1,9 @@
-//! 中心「插件」页：已装插件列表、本地目录安装、启停与权限明示。
+//! 中心「插件」页：已装插件列表、本地目录/zip 安装、市场 v0、
+//! 启停与权限明示。
 //!
-//! 插件 = 独立进程（协议 v0：stdio 行式 JSON）。v0 权限为声明 + 明示
-//!（不做运行时强制隔离；进程隔离 + bwrap 白名单兜底列入 M4）。
+//! M4 起宿主强制安全：插件经 bwrap 沙箱拉起（fail-closed），系统能力
+//! 须经宿主能力代理并受 manifest 权限约束。市场/网络只在中心应用
+//! 的后台线程发生，呼出路径零 IO 底线不变。
 
 use adw::prelude::*;
 use gtk::glib;
@@ -13,16 +15,22 @@ use std::time::Duration;
 
 use yihu_core::plugins;
 
+use crate::market::{self, MarketPlugin};
 use crate::{page_shell, scroll_clamp};
 
 struct Ui {
     busy: Cell<bool>,
     list_box: GtkBox,
     state_hint: Label,
+    market_box: GtkBox,
+    market_hint: Label,
+    market_plugins: Rc<std::cell::RefCell<Vec<MarketPlugin>>>,
 }
 
 /// 后台任务结果槽（阻塞调用不入 UI 主线程的既有惯例）
 type Slot = Arc<Mutex<Option<String>>>;
+/// 市场刷新结果槽
+type MarketSlot = Arc<Mutex<Option<Result<Vec<MarketPlugin>, String>>>>;
 
 pub fn build_page() -> gtk::Widget {
     // —— 卡片：说明 ——
@@ -46,25 +54,43 @@ pub fn build_page() -> gtk::Widget {
     }
 
     // —— 卡片：从目录安装 ——
-    let install_card = card();
-    let install_title = Label::new(Some("从目录安装"));
-    install_title.add_css_class("sec-title");
-    install_title.set_halign(Align::Start);
-    install_card.append(&install_title);
-    let row = GtkBox::new(Orientation::Horizontal, 8);
-    let path_entry = Entry::new();
-    path_entry.set_placeholder_text(Some("/路径/插件目录（内含 manifest.toml）"));
-    path_entry.set_hexpand(true);
-    let install_btn = Button::with_label("安装");
-    row.append(&path_entry);
-    row.append(&install_btn);
-    install_card.append(&row);
-    let install_hint = Label::new(None);
-    install_hint.add_css_class("dim-label");
-    install_hint.add_css_class("caption-sm");
-    install_hint.set_halign(Align::Start);
-    install_hint.set_wrap(true);
-    install_card.append(&install_hint);
+    let (install_card, path_entry, install_btn, install_hint) = install_card_common(
+        "从目录安装",
+        "/路径/插件目录（内含 manifest.toml）",
+    );
+
+    // —— 卡片：从 zip 安装 ——
+    let (zip_card, zip_entry, zip_btn, _zip_hint) =
+        install_card_common("从 zip 安装", "/路径/插件包.zip（64 MiB 内，安全校验后原子安装）");
+
+    // —— 卡片：市场 v0 ——
+    let market_card = card();
+    let market_title = Label::new(Some("插件市场（v0 实验性）"));
+    market_title.add_css_class("sec-title");
+    market_title.set_halign(Align::Start);
+    market_card.append(&market_title);
+    let mrow = GtkBox::new(Orientation::Horizontal, 8);
+    let url_entry = Entry::new();
+    url_entry.set_placeholder_text(Some("registry.json 地址（GitHub PR 审核维护）"));
+    url_entry.set_hexpand(true);
+    let refresh_btn = Button::with_label("刷新");
+    mrow.append(&url_entry);
+    mrow.append(&refresh_btn);
+    market_card.append(&mrow);
+    let market_hint = Label::new(None);
+    market_hint.add_css_class("dim-label");
+    market_hint.add_css_class("caption-sm");
+    market_hint.set_halign(Align::Start);
+    market_hint.set_wrap(true);
+    market_card.append(&market_hint);
+    let market_box = GtkBox::new(Orientation::Vertical, 8);
+    market_card.append(&market_box);
+    if let Ok(saved) = yihu_core::paths::read_compatible("market_url") {
+        let saved = saved.trim().to_string();
+        if !saved.is_empty() {
+            url_entry.set_text(&saved);
+        }
+    }
 
     // —— 卡片：已装插件 ——
     let list_card = card();
@@ -90,7 +116,7 @@ pub fn build_page() -> gtk::Widget {
     main_box.set_margin_start(24);
     main_box.set_margin_end(24);
     main_box.set_valign(Align::Start);
-    for c in [&help_card, &install_card, &list_card] {
+    for c in [&help_card, &install_card, &zip_card, &market_card, &list_card] {
         c.set_hexpand(true);
         main_box.append(c);
     }
@@ -98,48 +124,131 @@ pub fn build_page() -> gtk::Widget {
     let ui = Rc::new(Ui {
         busy: Cell::new(false),
         list_box,
-        state_hint: install_hint,
+        state_hint: install_hint.clone(),
+        market_box,
+        market_hint,
+        market_plugins: Rc::new(std::cell::RefCell::new(Vec::new())),
     });
 
-    // —— 信号：安装（后台线程 + 轮询回填）——
+    // —— 信号：目录安装（后台线程 + 轮询回填）——
+    spawn_on_click(install_btn, path_entry, ui.clone(), move |src| {
+        plugins::install_from_dir(std::path::Path::new(&src))
+            .map(|m| format!("已安装：{}（{}）", m.name, m.id))
+            .map_err(|e| e.to_string())
+    });
+
+    // —— 信号：zip 安装 ——
+    spawn_on_click(zip_btn, zip_entry, ui.clone(), move |src| {
+        yihu_core::zipfile::install_from_zip(std::path::Path::new(&src))
+            .map(|m| format!("已安装：{}（{}）· sha256 已记入收据", m.name, m.id))
+    });
+
+    // —— 信号：市场刷新 ——
     {
         let ui = ui.clone();
-        let path = path_entry.clone();
-        let slot: Slot = Arc::new(Mutex::new(None));
-        let slot2 = slot.clone();
-        install_btn.connect_clicked(move |_| {
-            let src = path.text().to_string();
-            if src.trim().is_empty() || ui.busy.get() {
+        let slot: MarketSlot = Arc::new(Mutex::new(None));
+        refresh_btn.connect_clicked(move |_| {
+            if ui.busy.get() {
                 return;
             }
             ui.busy.set(true);
-            ui.state_hint.set_text("安装中…");
-            let slot3 = slot2.clone();
+            ui.market_hint.set_text("拉取中…");
+            let url = url_entry.text().trim().to_string();
+            let url = if url.is_empty() {
+                market::DEFAULT_REGISTRY_URL.to_string()
+            } else {
+                url
+            };
+            let _ = yihu_core::paths::write_current("market_url", &url);
+            let slot2 = slot.clone();
             std::thread::spawn(move || {
-                let res = plugins::install_from_dir(std::path::Path::new(src.trim()))
-                    .map(|m| format!("已安装：{}（{}）", m.name, m.id))
-                    .map_err(|e| e.to_string());
-                *slot3.lock().unwrap() = Some(match res {
-                    Ok(msg) => msg,
-                    Err(e) => format!("失败：{e}"),
-                });
+                *slot2.lock().unwrap() = Some(market::fetch_registry(&url));
             });
             let ui = ui.clone();
-            let slot = slot2.clone();
+            let slot = slot.clone();
             glib::timeout_add_local(Duration::from_millis(150), move || {
-                if let Some(res) = slot.lock().unwrap().take() {
-                    ui.busy.set(false);
-                    ui.state_hint.set_text(&res);
-                    ui.refresh_list();
-                    return glib::ControlFlow::Break;
+                let Some(res) = slot.lock().unwrap().take() else {
+                    return glib::ControlFlow::Continue;
+                };
+                ui.busy.set(false);
+                match res {
+                    Ok(list) => {
+                        ui.market_hint.set_text(&format!("市场条目 {} 个", list.len()));
+                        *ui.market_plugins.borrow_mut() = list;
+                        ui.refresh_market();
+                    }
+                    Err(e) => ui.market_hint.set_text(&format!("失败：{e}")),
                 }
-                glib::ControlFlow::Continue
+                glib::ControlFlow::Break
             });
         });
     }
 
     ui.refresh_list();
     page_shell("插件", &scroll_clamp(&main_box, 720))
+}
+
+/// 目录/zip 两张安装卡的公共结构
+fn install_card_common(
+    title: &str,
+    placeholder: &str,
+) -> (GtkBox, Entry, Button, Label) {
+    let card_box = card();
+    let t = Label::new(Some(title));
+    t.add_css_class("sec-title");
+    t.set_halign(Align::Start);
+    card_box.append(&t);
+    let row = GtkBox::new(Orientation::Horizontal, 8);
+    let entry = Entry::new();
+    entry.set_placeholder_text(Some(placeholder));
+    entry.set_hexpand(true);
+    let btn = Button::with_label("安装");
+    row.append(&entry);
+    row.append(&btn);
+    card_box.append(&row);
+    let hint = Label::new(None);
+    hint.add_css_class("dim-label");
+    hint.add_css_class("caption-sm");
+    hint.set_halign(Align::Start);
+    hint.set_wrap(true);
+    card_box.append(&hint);
+    (card_box, entry, btn, hint)
+}
+
+/// 通用「点按钮 → 后台执行 → 轮询回填」模式（目录/zip 安装共用）
+fn spawn_on_click<F>(btn: Button, entry: Entry, ui: Rc<Ui>, f: F)
+where
+    F: Fn(String) -> Result<String, String> + Send + Sync + 'static,
+{
+    let f = Arc::new(f);
+    let slot: Slot = Arc::new(Mutex::new(None));
+    btn.connect_clicked(move |_| {
+        let src = entry.text().to_string();
+        if src.trim().is_empty() || ui.busy.get() {
+            return;
+        }
+        ui.busy.set(true);
+        ui.state_hint.set_text("安装中…");
+        let slot2 = slot.clone();
+        let f = f.clone();
+        std::thread::spawn(move || {
+            *slot2.lock().unwrap() = Some(match f(src.trim().to_string()) {
+                Ok(msg) => msg,
+                Err(e) => format!("失败：{e}"),
+            });
+        });
+        let ui = ui.clone();
+        let slot = slot.clone();
+        glib::timeout_add_local(Duration::from_millis(150), move || {
+            if let Some(res) = slot.lock().unwrap().take() {
+                ui.busy.set(false);
+                ui.state_hint.set_text(&res);
+                ui.refresh_list();
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
+    });
 }
 
 impl Ui {
@@ -237,6 +346,107 @@ impl Ui {
             self.list_box.append(&row);
         }
     }
+
+    /// 重建市场条目列表（&Rc<Self> 接收者：行内闭包需要克隆 Rc）
+    fn refresh_market(self: &Rc<Self>) {
+        let ui = self.clone();
+        while let Some(child) = self.market_box.first_child() {
+            self.market_box.remove(&child);
+        }
+        let list = self.market_plugins.borrow().clone();
+        if list.is_empty() {
+            let empty = Label::new(Some("（空）"));
+            empty.add_css_class("dim-label");
+            empty.add_css_class("caption-sm");
+            empty.set_halign(Align::Start);
+            self.market_box.append(&empty);
+            return;
+        }
+        for p in &list {
+            let row = GtkBox::new(Orientation::Horizontal, 8);
+            let col = GtkBox::new(Orientation::Vertical, 2);
+            let t = Label::new(Some(&format!("{} {}", p.name, p.version)));
+            t.add_css_class("row-title");
+            t.set_halign(Align::Start);
+            let perms = if p.permissions.is_empty() {
+                "权限：无".to_string()
+            } else {
+                format!(
+                    "权限：{}",
+                    p.permissions
+                        .iter()
+                        .map(|x| format!("{x}（{}）", yihu_core::permissions::label(x)))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                )
+            };
+            let sub = Label::new(Some(&format!(
+                "{} · {} · {perms} · sha256 前 8 位 {}",
+                p.desc,
+                p.id,
+                &p.sha256[..8.min(p.sha256.len())]
+            )));
+            sub.add_css_class("caption-sm");
+            sub.add_css_class("dim-label");
+            sub.set_halign(Align::Start);
+            sub.set_wrap(true);
+            col.append(&t);
+            col.append(&sub);
+            col.set_hexpand(true);
+            col.set_valign(Align::Center);
+            row.append(&col);
+
+            let install = Button::with_label("安装");
+            install.set_valign(Align::Center);
+            {
+                let p = p.clone();
+                let ui_row = ui.clone();
+                install.connect_clicked(move |_| {
+                    install_market_plugin(&ui_row, p.clone());
+                });
+            }
+            row.append(&install);
+            self.market_box.append(&row);
+        }
+    }
+}
+
+/// 市场安装：下载 → 体积核对 → sha256 核验 → 原子安装（后台线程）。
+fn install_market_plugin(ui: &Rc<Ui>, p: MarketPlugin) {
+    if ui.busy.get() {
+        return;
+    }
+    ui.busy.set(true);
+    ui.state_hint.set_text(&format!("下载 {}…", p.name));
+    let slot: Slot = Arc::new(Mutex::new(None));
+    let slot2 = slot.clone();
+    std::thread::spawn(move || {
+        let tmp = std::env::temp_dir().join(format!("yihu-market-{}-{}.zip", std::process::id(), p.id));
+        let res = (|| -> Result<String, String> {
+            let n = market::download_to(&p.url, &tmp)?;
+            if p.size > 0 && n != p.size {
+                return Err(format!("体积不符：期望 {} 字节，实际 {n}", p.size));
+            }
+            yihu_core::zipfile::install_from_zip_verified(&tmp, &p.sha256, &p.url)
+                .map(|m| format!("已安装：{}（{}）", m.name, m.id))
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        *slot2.lock().unwrap() = Some(match res {
+            Ok(msg) => msg,
+            Err(e) => format!("失败：{e}"),
+        });
+    });
+    let ui = ui.clone();
+    let slot = slot.clone();
+    glib::timeout_add_local(Duration::from_millis(150), move || {
+        if let Some(res) = slot.lock().unwrap().take() {
+            ui.busy.set(false);
+            ui.state_hint.set_text(&res);
+            ui.refresh_list();
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 fn card() -> GtkBox {

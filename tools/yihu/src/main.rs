@@ -6,6 +6,7 @@
 
 mod adapters;
 mod cover_disc;
+mod market;
 mod mpris;
 mod nautilus;
 mod page_apps;
