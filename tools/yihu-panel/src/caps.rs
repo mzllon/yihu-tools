@@ -29,6 +29,8 @@ pub enum CapAction {
     OpenUri(String),
     LaunchApp(String),
     Notify { summary: String, body: String },
+    /// 截屏（宿主经 xdg-desktop-portal 异步执行，pump 完成后回包）
+    Screenshot { mode: String, clipboard: bool },
 }
 
 /// 授权 + 参数校验。Err 文案直接回给插件（capability_response.error）。
@@ -82,6 +84,17 @@ pub fn evaluate(
             Ok(CapAction::Notify {
                 summary: summary.to_string(),
                 body: body.to_string(),
+            })
+        }
+        perms::SCREENSHOT_TAKE => {
+            let mode = get("mode")?;
+            if mode != "full" && mode != "area" {
+                return Err(format!("mode {mode:?} 非法（full/area）"));
+            }
+            let clipboard = params.get("clipboard").and_then(|v| v.as_bool()).unwrap_or(false);
+            Ok(CapAction::Screenshot {
+                mode: mode.to_string(),
+                clipboard,
             })
         }
         // SELECTED_FILES_READ 不是主动请求的能力：query.context 由宿主
@@ -180,6 +193,26 @@ mod tests {
         assert!(evaluate(&d, perms::NOTIFY, &json!({"summary":long_sum})).is_err());
         let long_body = "b".repeat(MAX_NOTIFY_BODY + 1);
         assert!(evaluate(&d, perms::NOTIFY, &json!({"summary":"s","body":long_body})).is_err());
+    }
+
+    #[test]
+    fn screenshot_take_validates_mode() {
+        let d = declared(&[perms::SCREENSHOT_TAKE]);
+        let a = evaluate(
+            &d,
+            perms::SCREENSHOT_TAKE,
+            &json!({"mode":"area","clipboard":true}),
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            CapAction::Screenshot { mode: "area".into(), clipboard: true }
+        );
+        assert!(evaluate(&d, perms::SCREENSHOT_TAKE, &json!({"mode":"window"})).is_err());
+        assert!(evaluate(&d, perms::SCREENSHOT_TAKE, &json!({})).is_err());
+        // 默认 clipboard=false
+        let a = evaluate(&d, perms::SCREENSHOT_TAKE, &json!({"mode":"full"})).unwrap();
+        assert!(!matches!(a, CapAction::Screenshot { clipboard: true, .. }));
     }
 
     #[test]

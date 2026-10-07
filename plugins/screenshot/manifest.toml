@@ -1,0 +1,11 @@
+id = "screenshot"
+name = "截图"
+version = "0.1.0"
+api = "^1"
+entry = "shot.py"
+icon = "camera-photo-symbolic"
+
+[[triggers]]
+keywords = ["screenshot", "截图", "截屏", "jietu"]
+
+permissions = ["screenshot.take"]

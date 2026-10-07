@@ -60,6 +60,22 @@ struct Deps {
     app_refresh: Arc<Mutex<Option<Vec<PanelEntry>>>>,
     /// 系统插件启用集（呼出时加载缓存；key 路径零 IO，中心页改开关下次呼出生效）
     sys_plugins: Rc<RefCell<std::collections::HashSet<String>>>,
+    /// 异步能力结果槽（截屏等：后台线程完成后经此回主循环回包）
+    cap_async: Arc<Mutex<Vec<CapOutcome>>>,
+}
+
+/// 后台执行的能力结果（截屏）：由常驻泵回主循环回包/审计/副作用
+struct CapOutcome {
+    plugin: String,
+    gen: u64,
+    request_id: u64,
+    ok: bool,
+    error: String,
+    /// 截图文件路径（成功时；用于系统通知）
+    path: String,
+    /// clipboard=true 时的 PNG 字节（主线程写剪贴板）
+    png: Option<Vec<u8>>,
+    clipboard: bool,
 }
 
 /// 当前面板窗口及其专属控件（每次呼出重建一份）
@@ -122,6 +138,7 @@ pub fn run_daemon() {
         let plugins = Rc::new(RefCell::new(PluginMgr::new()));
         let audit = Rc::new(yihu_core::audit::Audit::open(yihu_core::audit::audit_path()));
         let app_refresh: Arc<Mutex<Option<Vec<PanelEntry>>>> = Arc::new(Mutex::new(None));
+        let cap_async: Arc<Mutex<Vec<CapOutcome>>> = Arc::new(Mutex::new(Vec::new()));
         let deps = Rc::new(Deps {
             app: app.clone(),
             plugins,
@@ -139,6 +156,7 @@ pub fn run_daemon() {
             audit,
             app_refresh: app_refresh.clone(),
             sys_plugins: sys_plugins.clone(),
+            cap_async: cap_async.clone(),
         });
 
         // —— 应用列表热刷新（AppInfoMonitor，穿插小项）——
@@ -193,6 +211,40 @@ pub fn run_daemon() {
                     *deps.nuc.borrow_mut() = build_nucleo(&new_apps);
                     if deps.visible.load(Ordering::Relaxed) {
                         deps.dirty.set(true);
+                    }
+                }
+                // 异步能力结果（截屏等）：回包 + 审计 + 副作用
+                for out in deps.cap_async.lock().unwrap().drain(..) {
+                    if out.ok {
+                        deps.plugins
+                            .borrow_mut()
+                            .respond_gen(&out.plugin, out.gen, out.request_id, true, "");
+                        deps.audit
+                            .record(&out.plugin, out.gen, "screenshot.take", "grant", "");
+                        if out.clipboard {
+                            if let Some(bytes) = &out.png {
+                                if let Some(display) = gdk::Display::default() {
+                                    let provider = gdk::ContentProvider::for_bytes(
+                                        "image/png",
+                                        &glib::Bytes::from(bytes.as_slice()),
+                                    );
+                                    if display.clipboard().set_content(Some(&provider)).is_err() {
+                                        eprintln!("yihu-panel: 截图写入剪贴板失败");
+                                    }
+                                }
+                            }
+                        }
+                        let summary = if out.clipboard { "截图已复制到剪贴板" } else { "截图已保存" };
+                        let _ = spawn_detached_checked(
+                            "notify-send",
+                            &["--app-name=一呼", &format!("{summary}：{}", out.path)],
+                        );
+                    } else {
+                        deps.plugins
+                            .borrow_mut()
+                            .respond_gen(&out.plugin, out.gen, out.request_id, false, &out.error);
+                        deps.audit
+                            .record(&out.plugin, out.gen, "screenshot.take", "error", &out.error);
                     }
                 }
                 // 常驻 provider 空闲清扫只在隐藏态跑（可见态 keystroke
@@ -682,6 +734,13 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
         return;
     };
     let outcome = match crate::caps::evaluate(&declared, &req.capability, &req.params) {
+        // 截屏是异步长操作（区域模式等用户框选）：后台执行，常驻泵回包
+        Ok(crate::caps::CapAction::Screenshot { mode, clipboard }) => {
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", "");
+            spawn_screenshot_job(deps, &req, &mode, clipboard);
+            return;
+        }
         Ok(action) => execute_capability(action),
         Err(e) => Err(e),
     };
@@ -701,6 +760,61 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
                 .record(&req.plugin, req.gen, &req.capability, "deny", &e);
         }
     }
+}
+
+/// 截屏后台作业：portal 调用（可能等用户框选数分钟）→ 结果入槽，
+/// 常驻泵回主循环回包。审批（grant 审计）已在 handle_capability 记录。
+fn spawn_screenshot_job(deps: &Deps, req: &crate::sessions::CapRequest, mode: &str, clipboard: bool) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    let mode = mode.to_string();
+    std::thread::spawn(move || {
+        let (ok, error, path, png) = match crate::screenshot::take(&mode, clipboard) {
+            Ok(png) => (true, String::new(), latest_shot_path_hint(&mode), png),
+            Err(e) => (false, e, String::new(), None),
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            ok,
+            error,
+            path,
+            png,
+            clipboard,
+        });
+    });
+}
+
+/// 通知用路径提示：portal 响应里的 URI 在 screenshot::take 内部解析，
+/// 这里从 Pictures 目录取最新文件兜底（通知文案用途，失败不碍事）。
+fn latest_shot_path_hint(mode: &str) -> String {
+    let dir = std::env::var("XDG_PICTURES_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+            )
+            .join("图片")
+        });
+    let shot_dir = dir.join("Screenshots");
+    let best = std::fs::read_dir(&shot_dir)
+        .ok()
+        .and_then(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
+                .map(|e| e.path())
+                .max_by_key(|p| {
+                    p.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                })
+        });
+    best.map(|p| p.display().to_string())
+        .unwrap_or_else(|| (mode == "area").then(|| "已按所选区域保存".to_string()).unwrap_or_default())
 }
 
 /// 执行已授权的能力动作。GTK 动作在主线程（tick 内天然成立）；
@@ -729,6 +843,8 @@ fn execute_capability(action: crate::caps::CapAction) -> Result<(), String> {
                 spawn_detached_checked("notify-send", &[&summary, &body])
             }
         }
+        // 截屏走异步作业（handle_capability 拦截），同步路径不可达
+        crate::caps::CapAction::Screenshot { .. } => Ok(()),
     }
 }
 
@@ -767,12 +883,19 @@ fn dispatch_item(deps: &Deps, store: &gio::ListStore, pos: u32, slot: &Slot) {
     }
     if kind == "plugin" {
         // v0 激活语义：宿主复制 payload（Wayland 下插件进程自行操作剪贴板
-        // 不可靠），并转发 activate 让插件感知
+        // 不可靠），并转发 activate 让插件感知。
+        // `!` 前缀 = 动作型 payload，不自动复制（如截图插件的 "full"）。
         let Some((pid, pl)) = payload.split_once('|') else {
             return;
         };
-        if let Some(ui) = slot.borrow().as_ref() {
-            ui.win.clipboard().set_text(pl);
+        let (copy, pl) = match pl.strip_prefix('!') {
+            Some(rest) => (false, rest),
+            None => (true, pl),
+        };
+        if copy {
+            if let Some(ui) = slot.borrow().as_ref() {
+                ui.win.clipboard().set_text(pl);
+            }
         }
         deps.plugins.borrow_mut().activate(pid, pl);
         record(&deps.history, &format!("plugin:{pid}"));

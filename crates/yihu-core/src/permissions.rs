@@ -21,6 +21,8 @@ pub const LAUNCH_APP: &str = "launch_app";
 pub const NOTIFY: &str = "notify";
 /// query 携带文件管理器选中项上下文（`context.files`）
 pub const SELECTED_FILES_READ: &str = "selected_files.read";
+/// 经宿主截屏（xdg-desktop-portal；mode = full/area，可选拷贝到剪贴板）
+pub const SCREENSHOT_TAKE: &str = "screenshot.take";
 
 /// v1 全部合法能力名
 pub const KNOWN: &[&str] = &[
@@ -29,6 +31,7 @@ pub const KNOWN: &[&str] = &[
     LAUNCH_APP,
     NOTIFY,
     SELECTED_FILES_READ,
+    SCREENSHOT_TAKE,
 ];
 
 /// 校验 manifest 的 permissions 列表：全部必须为已知能力名，去重保序返回。
@@ -56,6 +59,7 @@ pub fn label(name: &str) -> &'static str {
         LAUNCH_APP => "启动应用（已安装列表内）",
         NOTIFY => "桌面通知",
         SELECTED_FILES_READ => "读取文件管理器选中项",
+        SCREENSHOT_TAKE => "截屏（经系统截图接口）",
         _ => "未知权限",
     }
 }

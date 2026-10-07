@@ -10,6 +10,7 @@ mod calc;
 mod pinyin_index;
 mod providers;
 mod sandbox;
+mod screenshot;
 mod sessions;
 mod service;
 

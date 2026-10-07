@@ -669,7 +669,11 @@ for line in sys.stdin:
                   "items": [{"title": f"files:{n}", "payload": "p"}]})
             continue
         rid = 1000 + m["id"]
-        cap = "clipboard.write" if text != "notify" else "notify"
+        if text == "shot":
+            # 未声明 screenshot.take：应被拒绝且不触发真实截屏
+            cap = "screenshot.take"
+        else:
+            cap = "clipboard.write" if text != "notify" else "notify"
         send({"type": "capability_request", "id": rid, "capability": cap,
               "params": {"text": "hello", "summary": "s"}})
         pending[rid] = m["id"]
@@ -835,6 +839,18 @@ for line in sys.stdin:
         let gen = mgr.session_gen("fake-plugin").expect("会话在");
         assert!(mgr.permissions_of_gen("fake-plugin", gen).unwrap().contains("clipboard.write"));
         assert!(!mgr.permissions_of_gen("fake-plugin", gen).unwrap().contains("notify"));
+        // ④b 未声明 screenshot.take → 参数/词表拒绝路径（不触发 portal）
+        mgr.broadcast("shot");
+        let caps = wait_for(&mut mgr, Duration::from_secs(10), |_, c| {
+            c.iter().any(|r| r.capability == "screenshot.take")
+        });
+        let shot = caps.iter().find(|r| r.capability == "screenshot.take").unwrap();
+        assert_eq!(shot.plugin, "fake-plugin", "plain-plugin 未先命中（无妨，任一均可）");
+        mgr.respond_gen(&shot.plugin, shot.gen, shot.request_id, false, "manifest 未声明能力 screenshot.take");
+        wait_for(&mut mgr, Duration::from_secs(10), |m, _| {
+            m.latest_rows().iter().any(|r| r.title.contains("screenshot.take"))
+        });
+
         // ⑤ 常驻（resident）：kill_all 后 plain-plugin 存活、fake-plugin
         //    已死；空闲超阈值立即 shutdown → 插件 exit(0) 自退且不计失败
         mgr.kill_all();

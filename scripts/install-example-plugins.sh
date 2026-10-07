@@ -24,4 +24,9 @@ mkdir -p "$REG/sandbox-probe"
 install -m755 "$ROOT/plugins/sandbox-probe/probe.py" "$REG/sandbox-probe/probe.py"
 install -m644 "$ROOT/plugins/sandbox-probe/manifest.toml" "$REG/sandbox-probe/manifest.toml"
 
-echo "已安装示例插件：ts-convert、passgen、sandbox-probe（$REG）"
+# 截图插件：搜索行 + screenshot.take 能力代理（宿主 portal 执行）
+mkdir -p "$REG/screenshot"
+install -m755 "$ROOT/plugins/screenshot/shot.py" "$REG/screenshot/shot.py"
+install -m644 "$ROOT/plugins/screenshot/manifest.toml" "$REG/screenshot/manifest.toml"
+
+echo "已安装示例插件：ts-convert、passgen、sandbox-probe、screenshot（$REG）"
