@@ -362,12 +362,14 @@ impl PluginMgr {
         acted
     }
 
-    /// 常驻会话是否仍在（跨收起存活校验，测试/调试用）
+    /// 常驻会话是否仍在（跨收起存活校验；cfg(test) 之外暂无调用方）
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_session_alive(&self, plugin: &str) -> bool {
         self.sessions.iter().any(|s| s.id == plugin)
     }
 
-    /// 某插件当前滑动窗口内的失败计数（测试/调试用）
+    /// 某插件当前滑动窗口内的失败计数（同上）
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn failures_of(&self, plugin: &str) -> usize {
         self.recent_failures(plugin)
     }
@@ -478,6 +480,12 @@ impl PluginMgr {
         if self.recent_failures(plugin) >= MAX_FAILURES {
             self.disabled_by_failures.insert(plugin.to_string());
             eprintln!("yihu-panel: 插件 {plugin} 在 5 分钟内失败 {MAX_FAILURES} 次，本次运行期禁用");
+            // M4 穿插项：落盘持久禁用（重启后仍禁用；中心「插件」页开关可恢复）
+            let mut st = yihu_core::plugins::PluginsState::load();
+            st.set_disabled(plugin, true);
+            if let Err(e) = st.save_to(&yihu_core::plugins::state_path()) {
+                eprintln!("yihu-panel: 崩溃禁用落盘失败：{e}");
+            }
         }
     }
 }

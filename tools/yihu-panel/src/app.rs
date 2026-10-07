@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gtk::glib;
@@ -56,6 +56,8 @@ struct Deps {
     fade_tx: mpsc::Sender<Cmd>,
     /// 能力代理审计（后台线程写 JSONL，record 永不阻塞主循环）
     audit: Rc<yihu_core::audit::Audit>,
+    /// 应用列表热刷新槽：AppInfoMonitor 触发后台重扫，结果经此回主循环
+    app_refresh: Arc<Mutex<Option<Vec<PanelEntry>>>>,
 }
 
 /// 当前面板窗口及其专属控件（每次呼出重建一份）
@@ -111,6 +113,7 @@ pub fn run_daemon() {
         let nuc = Rc::new(RefCell::new(build_nucleo(&apps)));
         let plugins = Rc::new(RefCell::new(PluginMgr::new()));
         let audit = Rc::new(yihu_core::audit::Audit::open(yihu_core::audit::audit_path()));
+        let app_refresh: Arc<Mutex<Option<Vec<PanelEntry>>>> = Arc::new(Mutex::new(None));
         let deps = Rc::new(Deps {
             app: app.clone(),
             plugins,
@@ -126,7 +129,36 @@ pub fn run_daemon() {
             faded: Rc::new(Cell::new(false)),
             fade_tx: tx.clone(),
             audit,
+            app_refresh: app_refresh.clone(),
         });
+
+        // —— 应用列表热刷新（AppInfoMonitor，穿插小项）——
+        // 新装/卸载应用不再要求重启面板；呼出路径零 IO 不变（重扫在
+        // 后台线程，重建在主循环 tick，与启动时同一构建函数）。
+        {
+            let pending = Rc::new(Cell::new(false));
+            let monitor = gio::AppInfoMonitor::get();
+            monitor.connect_changed(move |_| {
+                if pending.get() {
+                    return;
+                }
+                pending.set(true);
+                // 防抖 2s：安装过程会连发多次 changed
+                let slot = app_refresh.clone();
+                let pending2 = pending.clone();
+                glib::timeout_add_local(Duration::from_secs(2), move || {
+                    pending2.set(false);
+                    let slot = slot.clone();
+                    std::thread::spawn(move || {
+                        let apps = collect_apps();
+                        *slot.lock().unwrap() = Some(apps);
+                    });
+                    glib::ControlFlow::Break
+                });
+            });
+            // 守护进程生命周期内常驻监听（泄漏 = 持有，同 app.hold 惯例）
+            std::mem::forget(monitor);
+        }
 
         let slot: Slot = Rc::new(RefCell::new(None));
 
@@ -137,6 +169,17 @@ pub fn run_daemon() {
             let app = app.clone();
             glib::timeout_add_local(Duration::from_millis(50), move || {
                 let mut quit = false;
+                // 应用列表热刷新消费：后台重扫完成 → 主循环重建（不阻塞）
+                if let Some(new_apps) = deps.app_refresh.lock().unwrap().take() {
+                    let caps = providers::BuiltinProvider::capabilities();
+                    let mut all = caps.clone();
+                    all.extend(new_apps.iter().cloned());
+                    *deps.entries.borrow_mut() = all;
+                    *deps.nuc.borrow_mut() = build_nucleo(&new_apps);
+                    if deps.visible.load(Ordering::Relaxed) {
+                        deps.dirty.set(true);
+                    }
+                }
                 // 常驻 provider 空闲清扫只在隐藏态跑（可见态 keystroke
                 // 持续刷新 last_used，清扫无意义且会打断正在交互的插件）
                 if !deps.visible.load(Ordering::Relaxed) {
