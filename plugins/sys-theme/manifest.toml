@@ -1,0 +1,11 @@
+id = "sys-theme"
+name = "系统主题切换"
+version = "0.1.0"
+api = "^1"
+entry = "theme.py"
+icon = "night-light-symbolic"
+
+[[triggers]]
+keywords = ["dark", "light", "深色", "浅色", "theme", "zhuti"]
+
+permissions = ["settings.write@org.gnome.desktop.interface", "notify"]

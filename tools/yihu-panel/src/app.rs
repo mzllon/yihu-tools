@@ -76,6 +76,10 @@ struct CapOutcome {
     /// clipboard=true 时的 PNG 字节（主线程写剪贴板）
     png: Option<Vec<u8>>,
     clipboard: bool,
+    /// 成功回包载荷（JSON 文本，如 network.fetch 响应体字符串）
+    data: Option<String>,
+    /// 该结果是否带成功通知（fs/settings 等静默能力不弹通知）
+    notify: bool,
 }
 
 /// 当前面板窗口及其专属控件（每次呼出重建一份）
@@ -216,9 +220,14 @@ pub fn run_daemon() {
                 // 异步能力结果（截屏等）：回包 + 审计 + 副作用
                 for out in deps.cap_async.lock().unwrap().drain(..) {
                     if out.ok {
-                        deps.plugins
-                            .borrow_mut()
-                            .respond_gen(&out.plugin, out.gen, out.request_id, true, "");
+                        deps.plugins.borrow_mut().respond_gen(
+                            &out.plugin,
+                            out.gen,
+                            out.request_id,
+                            true,
+                            "",
+                            out.data.as_deref(),
+                        );
                         deps.audit
                             .record(&out.plugin, out.gen, "screenshot.take", "grant", "");
                         if out.clipboard {
@@ -234,19 +243,35 @@ pub fn run_daemon() {
                                 }
                             }
                         }
-                        let summary = if out.clipboard { "截图已复制到剪贴板" } else { "截图已保存" };
-                        let _ = spawn_detached_checked(
-                            "notify-send",
-                            &["--app-name=一呼", &format!("{summary}：{}", out.path)],
-                        );
+                        if out.notify {
+                            let summary = if out.clipboard {
+                                "截图已复制到剪贴板"
+                            } else {
+                                "截图已保存"
+                            };
+                            let _ = spawn_detached_checked(
+                                "notify-send",
+                                &["--app-name=一呼", &format!("{summary}：{}", out.path)],
+                            );
+                        }
                     } else {
-                        deps.plugins
-                            .borrow_mut()
-                            .respond_gen(&out.plugin, out.gen, out.request_id, false, &out.error);
-                        deps.audit
-                            .record(&out.plugin, out.gen, "screenshot.take", "error", &out.error);
+                        deps.plugins.borrow_mut().respond_gen(
+                            &out.plugin,
+                            out.gen,
+                            out.request_id,
+                            false,
+                            &out.error,
+                            None,
+                        );
+                        deps.audit.record(
+                            &out.plugin,
+                            out.gen,
+                            if out.plugin == "hotkey" { "screenshot.take" } else { &out.plugin },
+                            "error",
+                            &out.error,
+                        );
                         // 用户主动取消：只审计，不弹通知打扰
-                        if out.error != "已取消" {
+                        if out.notify && out.error != "已取消" {
                             let _ = spawn_detached_checked(
                                 "notify-send",
                                 &["--app-name=一呼", &format!("截图失败：{}", out.error)],
@@ -294,6 +319,8 @@ pub fn run_daemon() {
                                     path,
                                     png: None,
                                     clipboard: false,
+                                    data: None,
+                                    notify: true,
                                 });
                             });
                         }
@@ -788,11 +815,39 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
         return;
     };
     let outcome = match crate::caps::evaluate(&declared, &req.capability, &req.params) {
-        // 截屏是异步长操作（区域模式等用户框选）：后台执行，常驻泵回包
+        // 异步长操作（截屏等用户交互 / 网络请求 / 写盘）：后台执行，泵回包
         Ok(crate::caps::CapAction::Screenshot { mode, clipboard }) => {
             deps.audit
                 .record(&req.plugin, req.gen, &req.capability, "grant", "");
             spawn_screenshot_job(deps, &req, &mode, clipboard);
+            return;
+        }
+        Ok(crate::caps::CapAction::NetworkFetch { url }) => {
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", &url);
+            spawn_network_job(deps, &req, &url);
+            return;
+        }
+        Ok(crate::caps::CapAction::SettingsWrite { schema, key, value }) => {
+            deps.audit.record(
+                &req.plugin,
+                req.gen,
+                &req.capability,
+                "grant",
+                &format!("{schema} {key}={value}"),
+            );
+            spawn_settings_job(deps, &req, &schema, &key, &value);
+            return;
+        }
+        Ok(crate::caps::CapAction::FsWrite { path, text }) => {
+            deps.audit.record(
+                &req.plugin,
+                req.gen,
+                &req.capability,
+                "grant",
+                &format!("{} ({} 字节)", path, text.len()),
+            );
+            spawn_fswrite_job(deps, &req, &path, &text);
             return;
         }
         Ok(action) => execute_capability(action),
@@ -802,18 +857,158 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
         Ok(()) => {
             deps.plugins
                 .borrow_mut()
-                .respond_gen(&req.plugin, req.gen, req.request_id, true, "");
+                .respond_gen(&req.plugin, req.gen, req.request_id, true, "", None);
             deps.audit
                 .record(&req.plugin, req.gen, &req.capability, "grant", "");
         }
         Err(e) => {
             deps.plugins
                 .borrow_mut()
-                .respond_gen(&req.plugin, req.gen, req.request_id, false, &e);
+                .respond_gen(&req.plugin, req.gen, req.request_id, false, &e, None);
             deps.audit
                 .record(&req.plugin, req.gen, &req.capability, "deny", &e);
         }
     }
+}
+
+/// network.fetch：宿主代发 GET（声明 host 白名单已在 caps 校验），
+/// 响应 UTF-8 文本回传（capability_response.data）。
+fn spawn_network_job(deps: &Deps, req: &crate::sessions::CapRequest, url: &str) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<String, String> {
+            let resp = ureq::get(&url)
+                .timeout(std::time::Duration::from_secs(20))
+                .call()
+                .map_err(|e| format!("请求失败：{e}"))?;
+            let mut text = String::new();
+            let mut reader = resp.into_reader();
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                use std::io::Read;
+                let n = reader.read(&mut buf).map_err(|e| format!("读取失败：{e}"))?;
+                if n == 0 {
+                    break;
+                }
+                if text.len() + n > crate::caps::MAX_FETCH_BYTES {
+                    return Err(format!("响应超限（>{} 字节）", crate::caps::MAX_FETCH_BYTES));
+                }
+                text.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+            Ok(text)
+        })();
+        let (ok, error, data) = match result {
+            Ok(t) => (true, String::new(), Some(t)),
+            Err(e) => (false, e, None),
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            ok,
+            error,
+            path: String::new(),
+            png: None,
+            clipboard: false,
+            data: data.map(|t| {
+                serde_json::to_string(&t).unwrap_or_else(|_| "null".into())
+            }),
+            notify: false,
+        });
+    });
+}
+
+/// settings.write：gsettings set（仅字符串值，schema 白名单已校验）。
+fn spawn_settings_job(deps: &Deps, req: &crate::sessions::CapRequest, schema: &str, key: &str, value: &str) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    let (schema, key, value) = (schema.to_string(), key.to_string(), value.to_string());
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("gsettings")
+            .args(["set", &schema, &key, &value])
+            .stdin(std::process::Stdio::null())
+            .output();
+        let (ok, error) = match out {
+            Ok(o) if o.status.success() => (true, String::new()),
+            Ok(o) => (
+                false,
+                format!(
+                    "gsettings 失败：{}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
+            ),
+            Err(e) => (false, format!("gsettings 启动失败：{e}")),
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            ok,
+            error,
+            path: String::new(),
+            png: None,
+            clipboard: false,
+            data: None,
+            notify: false,
+        });
+    });
+}
+
+/// fs.write：规范化路径（caps 已 glob 校验）→ 同目录临时文件 + rename 原子写。
+fn spawn_fswrite_job(deps: &Deps, req: &crate::sessions::CapRequest, path: &str, text: &str) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    let (path, text) = (path.to_string(), text.to_string());
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let result = (|| -> Result<(), String> {
+            let target = std::path::Path::new(&path);
+            let dir = target
+                .parent()
+                .ok_or_else(|| "路径无父目录".to_string())?;
+            std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败：{e}"))?;
+            let tmp = dir.join(format!(
+                ".yihu-fsw-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+            ));
+            {
+                let mut f =
+                    std::fs::File::create(&tmp).map_err(|e| format!("写临时文件失败：{e}"))?;
+                f.write_all(text.as_bytes())
+                    .map_err(|e| format!("写入失败：{e}"))?;
+            }
+            std::fs::rename(&tmp, target).map_err(|e| format!("提交失败：{e}"))?;
+            Ok(())
+        })();
+        let (ok, error) = match result {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, e),
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            ok,
+            error,
+            path: String::new(),
+            png: None,
+            clipboard: false,
+            data: None,
+            notify: false,
+        });
+    });
 }
 
 /// 截屏后台作业：portal 调用（可能等用户框选数分钟）→ 结果入槽，
@@ -845,6 +1040,8 @@ fn spawn_screenshot_job(deps: &Deps, req: &crate::sessions::CapRequest, mode: &s
             path,
             png,
             clipboard,
+            data: None,
+            notify: true,
         });
     });
 }
@@ -875,8 +1072,11 @@ fn execute_capability(action: crate::caps::CapAction) -> Result<(), String> {
                 spawn_detached_checked("notify-send", &[&summary, &body])
             }
         }
-        // 截屏走异步作业（handle_capability 拦截），同步路径不可达
+        // 以下均走异步作业（handle_capability 拦截），同步路径不可达
         crate::caps::CapAction::Screenshot { .. } => Ok(()),
+        crate::caps::CapAction::NetworkFetch { .. } => Ok(()),
+        crate::caps::CapAction::SettingsWrite { .. } => Ok(()),
+        crate::caps::CapAction::FsWrite { .. } => Ok(()),
     }
 }
 

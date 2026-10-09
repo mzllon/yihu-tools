@@ -52,7 +52,22 @@ def main() -> None:
         elif msg.get("type") == "query":
             text = msg.get("text", "")
             qid = msg.get("id", 0)
-            if text.startswith("copy:"):
+            if text.startswith("setting:"):
+                # settings.write：声明内 schema → 应授权
+                _request(out, qid, "settings.write",
+                         {"schema": "org.gnome.yihu-probe", "key": "last-run", "value": str(qid)},
+                         "grant", "写系统设置（已声明 schema）")
+            elif text.startswith("fswrite:"):
+                # fs.write：声明 glob 内路径 → 应授权
+                _request(out, qid, "fs.write",
+                         {"path": "~/.yihu-probe/data/probe.json", "text": "{\"ok\": true}"},
+                         "grant", "写文件（声明 glob 内）")
+            elif text.startswith("fsevil:"):
+                # fs.write：越界路径 → 应拒绝
+                _request(out, qid, "fs.write",
+                         {"path": "~/.ssh/authorized_keys", "text": "x"},
+                         "deny", "写文件（越界路径）")
+            elif text.startswith("copy:"):
                 # 已声明能力：宿主应授权并真实写入剪贴板
                 _request(out, qid, "clipboard.write", {"text": text[5:]}, "grant",
                          "宿主写剪贴板（已声明）")

@@ -221,7 +221,8 @@ fn install_row(placeholder: &str) -> (Entry, Button) {
     (e, b)
 }
 
-/// 权限徽章行：短名 pill + 中文 tooltip；空权限显示「无权限」灰徽章
+/// 权限徽章行：短名 pill + 中文说明 tooltip（含参数，如「访问网络
+/// api.x.com」「写文件 ~/.config/…」）；空权限显示「无权限」灰徽章
 fn perm_badges(perms: &[String]) -> GtkBox {
     let row = GtkBox::new(Orientation::Horizontal, 4);
     if perms.is_empty() {
@@ -234,7 +235,7 @@ fn perm_badges(perms: &[String]) -> GtkBox {
     for p in perms {
         let l = Label::new(Some(p));
         l.add_css_class("perm-badge");
-        l.set_tooltip_text(Some(yihu_core::permissions::label(p)));
+        l.set_tooltip_text(Some(&yihu_core::permissions::label(p)));
         row.append(&l);
     }
     row

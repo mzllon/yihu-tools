@@ -933,6 +933,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "gobject-sys"
 version = "0.20.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2728,12 +2734,14 @@ dependencies = [
 name = "yihu-panel"
 version = "0.1.0"
 dependencies = [
+ "glob",
  "gtk4",
  "libc",
  "nucleo",
  "pinyin",
  "serde",
  "serde_json",
+ "ureq",
  "yihu-core",
  "zbus 4.4.0",
 ]

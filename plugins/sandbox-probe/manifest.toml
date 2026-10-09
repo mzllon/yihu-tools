@@ -8,4 +8,4 @@ icon = "security-high-symbolic"
 [[triggers]]
 keywords = ["probe", "探针", "沙箱", "copy:", "notify:"]
 
-permissions = ["clipboard.write"]
+permissions = ["clipboard.write", "settings.write@org.gnome.yihu-probe", "fs.write@~/.yihu-probe/**/*.json"]

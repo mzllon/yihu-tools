@@ -29,4 +29,9 @@ mkdir -p "$REG/screenshot"
 install -m755 "$ROOT/plugins/screenshot/shot.py" "$REG/screenshot/shot.py"
 install -m644 "$ROOT/plugins/screenshot/manifest.toml" "$REG/screenshot/manifest.toml"
 
-echo "已安装示例插件：ts-convert、passgen、sandbox-probe、screenshot（$REG）"
+# 系统主题切换（M5 开放 API v2 示例：settings.write 声明制）
+mkdir -p "$REG/sys-theme"
+install -m755 "$ROOT/plugins/sys-theme/theme.py" "$REG/sys-theme/theme.py"
+install -m644 "$ROOT/plugins/sys-theme/manifest.toml" "$REG/sys-theme/manifest.toml"
+
+echo "已安装示例插件：ts-convert、passgen、sandbox-probe、screenshot、sys-theme（$REG）"
