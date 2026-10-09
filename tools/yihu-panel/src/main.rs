@@ -12,6 +12,7 @@ mod providers;
 mod sandbox;
 mod screenshot;
 mod sessions;
+mod theme;
 mod service;
 
 fn main() {

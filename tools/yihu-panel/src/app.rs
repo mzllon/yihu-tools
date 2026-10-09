@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    gio, gdk, Align, Box as GtkBox, Label, ListView, Orientation, ScrolledWindow, SearchEntry,
+    gio, gdk, Align, Box as GtkBox, ListView, Orientation, ScrolledWindow, SearchEntry,
     Window,
 };
 
@@ -117,7 +117,7 @@ pub fn run_daemon() {
         let rx = rx_cell.borrow_mut().take().expect("activate 仅发生一次");
         // 无窗口待命：hold 保证主循环常驻（泄漏 guard = 永久持有）
         std::mem::forget(app.hold());
-        load_css();
+        apply_css(); // 动态主题（accent + 深浅）
 
         let history = Rc::new(RefCell::new(yihu_core::panel::History::load()));
         // 系统插件启用集：启动时加载一次（启动路径 IO 合法），呼出时刷新
@@ -477,10 +477,24 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
     card.add_css_class("panel-card");
 
     let entry = SearchEntry::new();
-    entry.set_placeholder_text(Some("一呼即出：搜索应用 / 能力 / 算式"));
+    entry.set_placeholder_text(Some("搜索 / 计算 / 呼出能力"));
     entry.add_css_class("panel-search");
     entry.set_search_delay(0);
     card.append(&entry);
+
+    // —— 默认页（空查询）：常用应用图标墙 + 能力宫格；搜索时隐藏 ——
+    let grid_view = GtkBox::new(Orientation::Vertical, 2);
+    grid_view.append(&section_label("常用"));
+    grid_view.append(&build_app_wall(deps, slot));
+    grid_view.append(&section_label("快捷能力"));
+    grid_view.append(&build_cap_grid(deps, slot));
+    grid_view.append(&section_label("提示"));
+    let tip = gtk::Label::new(Some("输入即搜索；g 词 网页搜索 · 算式直接计算"));
+    tip.add_css_class("caption-sm");
+    tip.set_halign(Align::Start);
+    tip.set_margin_start(6);
+    grid_view.append(&tip);
+    card.append(&grid_view);
 
     let store = gio::ListStore::new::<PanelItem>();
     let sel = gtk::SingleSelection::new(Some(store.clone()));
@@ -507,7 +521,12 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
     scroll.set_max_content_height(520);
     scroll.set_vexpand(true);
     card.append(&scroll);
+
+    // —— 底部键提示栏 ——
+    card.append(&key_bar());
     win.set_child(Some(&card));
+    grid_view.set_visible(true); // 空查询默认显示
+    scroll.set_visible(false);
 
     // —— 主题跟随：gio::Settings 监听，show 路径零 IO ——
     watch_theme(&win);
@@ -545,8 +564,6 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
     // —— 刷新：nucleo 结果 / 分组默认集，计算行置顶 ——
     let tick = {
         let nuc = deps.nuc.clone();
-        let entries = deps.entries.clone();
-        let history = deps.history.clone();
         let query = deps.query.clone();
         let calc_row = deps.calc_row.clone();
         let dirty = deps.dirty.clone();
@@ -555,6 +572,8 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
         let win = win.clone();
         let plugins = deps.plugins.clone();
         let deps_cap = deps.clone();
+        let grid_view = grid_view.clone();
+        let scroll = scroll.clone();
         glib::timeout_add_local(Duration::from_millis(30), move || {
             let (plugin_dirty, cap_reqs) = plugins.borrow_mut().drain();
             if plugin_dirty {
@@ -576,14 +595,12 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
             }
             let q = query.borrow().clone();
             if q.is_empty() {
-                // 分组默认集：最近 / 快捷能力(胶囊)
-                for e in default_rows(&history.borrow(), &entries.borrow()) {
-                    if rows.len() >= MAX_SHOWN {
-                        break;
-                    }
-                    rows.push(e.clone());
-                }
+                // 默认页 = 网格视图（图标墙 + 能力宫格），列表退场
+                grid_view.set_visible(true);
+                scroll.set_visible(false);
             } else {
+                grid_view.set_visible(false);
+                scroll.set_visible(true);
                 {
                     let nuc = nuc.borrow();
                     let snap = nuc.snapshot();
@@ -941,6 +958,13 @@ fn watch_theme(win: &Window) {
         let win = win.clone();
         s.connect_changed(Some("color-scheme"), move |s, _| {
             apply(&win, &s.string("color-scheme"));
+            apply_css(); // 深浅切换换整套调色板（UI 重设计）
+        });
+    }
+    {
+        // 强调色变化：只重建样式表（GNOME 47+；键缺失时回调不触发）
+        s.connect_changed(Some("accent-color"), move |_, _| {
+            apply_css();
         });
     }
 }
@@ -1025,15 +1049,6 @@ fn build_nucleo(entries: &[PanelEntry]) -> nucleo::Nucleo<PanelEntry> {
 
 // ---- 分组默认集：最近 / 快捷能力(胶囊) / 常用应用 ----
 
-fn header_row(t: &str) -> PanelEntry {
-    PanelEntry {
-        title: t.to_string(),
-        subtitle: String::new(),
-        icon_spec: String::new(),
-        kind: "header",
-        payload: String::new(),
-    }
-}
 
 /// 最近使用条目：历史按时间排序后映射回条目（应用/能力），取前 n 个。
 fn recent_entries(
@@ -1054,105 +1069,8 @@ fn recent_entries(
         .collect()
 }
 
-/// 空输入时的分组默认集：最近（胶囊，应用+能力按时间，最多 4 个）→
-/// 快捷能力（胶囊 5 个）。全部为点击即触发的按钮，无普通行。
-fn default_rows(history: &yihu_core::panel::History, entries: &[PanelEntry]) -> Vec<PanelEntry> {
-    let mut rows = Vec::new();
 
-    let recent = recent_entries(history, entries, 3);
-    if !recent.is_empty() {
-        rows.push(header_row("最近"));
-        rows.push(PanelEntry {
-            title: String::new(),
-            subtitle: String::new(),
-            icon_spec: String::new(),
-            kind: "recent_chips",
-            payload: String::new(),
-        });
-    }
 
-    rows.push(header_row("快捷能力"));
-    rows.push(PanelEntry {
-        title: String::new(),
-        subtitle: String::new(),
-        icon_spec: String::new(),
-        kind: "chips",
-        payload: String::new(),
-    });
-    rows
-}
-
-/// 快捷能力胶囊：一行小按钮，点击直接触发（无需选中回车）。
-fn chip_buttons(deps: &Rc<Deps>, slot: &Slot) -> Vec<gtk::Button> {
-    const CHIPS: &[(&str, &str, &str)] = &[
-        ("theme:dark", "深色", "weather-clear-night-symbolic"),
-        ("theme:light", "浅色", "weather-clear-symbolic"),
-        ("center", "中心", "tools.yihu.desktop"),
-        ("page:radio", "广播", "applications-multimedia-symbolic"),
-        ("page:autodark", "主题页", "night-light-symbolic"),
-    ];
-    CHIPS
-        .iter()
-        .filter(|(payload, _, _)| {
-            deps.sys_plugins.borrow().contains(providers::owner_of(payload))
-        })
-        .map(|(payload, label, icon)| {
-            let b = gtk::Button::new();
-            b.add_css_class("panel-chip");
-            let bx = GtkBox::new(Orientation::Horizontal, 6);
-            let img = gtk::Image::from_icon_name(icon);
-            img.set_pixel_size(16);
-            bx.append(&img);
-            bx.append(&Label::new(Some(label)));
-            b.set_child(Some(&bx));
-            let deps = deps.clone();
-            let slot = slot.clone();
-            let payload = payload.to_string();
-            b.connect_clicked(move |_| {
-                providers::activate_capability(&payload, &deps.center);
-                record(&deps.history, &format!("cap:{payload}"));
-                hide_panel(&deps, &slot);
-            });
-            b
-        })
-        .collect()
-}
-
-/// 最近胶囊：最近用过的应用/能力（按时间，最多 4 个），点击即触发。
-fn recent_chip_buttons(deps: &Rc<Deps>, slot: &Slot) -> Vec<gtk::Button> {
-    let recent = recent_entries(&deps.history.borrow(), &deps.entries.borrow(), 4);
-    if std::env::var_os("YIHU_PANEL_DEBUG").is_some() {
-        eprintln!(
-            "yihu-panel: 最近胶囊 {} 个：{:?}",
-            recent.len(),
-            recent.iter().map(|e| &e.title).collect::<Vec<_>>()
-        );
-    }
-    recent
-        .iter()
-        .map(|e| {
-            let b = gtk::Button::new();
-            b.add_css_class("panel-chip");
-            let bx = GtkBox::new(Orientation::Horizontal, 6);
-            let img = gtk::Image::new();
-            img.set_pixel_size(16);
-            img.set_from_gicon(&gicon_for_spec(&e.icon_spec));
-            bx.append(&img);
-            let lbl = Label::new(Some(&e.title));
-            lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            lbl.set_max_width_chars(12);
-            bx.append(&lbl);
-            b.set_child(Some(&bx));
-            let e = e.clone();
-            let deps = deps.clone();
-            let slot = slot.clone();
-            b.connect_clicked(move |_| {
-                perform_entry(&deps, &slot, &e);
-            });
-            b
-        })
-        .collect()
-}
 
 /// 执行条目动作：app 启动 / cap 执行；成功后记历史并收起面板。
 fn perform_entry(deps: &Deps, slot: &Slot, e: &PanelEntry) {
@@ -1249,12 +1167,17 @@ fn settle<T: Send + Sync + 'static>(nuc: &mut nucleo::Nucleo<T>) {
 
 fn setup_row(_: &gtk::SignalListItemFactory, obj: &glib::Object) {
     let li = obj.downcast_ref::<gtk::ListItem>().expect("ListItem");
-    let row = GtkBox::new(Orientation::Horizontal, 12);
+    let row = GtkBox::new(Orientation::Horizontal, 10);
+    // 选中条：行首 3px 强调色竖条（选中态由 CSS .sel-bar 上色）
+    let sel_bar = GtkBox::new(Orientation::Vertical, 0);
+    sel_bar.add_css_class("sel-bar");
+    sel_bar.set_valign(Align::Fill);
     let icon = gtk::Image::new();
     icon.set_pixel_size(24);
     icon.set_valign(Align::Center);
     let col = GtkBox::new(Orientation::Vertical, 2);
     col.set_valign(Align::Center);
+    col.set_hexpand(true);
     let title = gtk::Label::new(None);
     title.add_css_class("row-title");
     title.set_halign(Align::Start);
@@ -1265,23 +1188,26 @@ fn setup_row(_: &gtk::SignalListItemFactory, obj: &glib::Object) {
     sub.set_ellipsize(gtk::pango::EllipsizeMode::End);
     col.append(&title);
     col.append(&sub);
-    let chips = GtkBox::new(Orientation::Horizontal, 8);
-    chips.set_valign(Align::Center);
-    chips.set_visible(false);
+    let badge = gtk::Label::new(None);
+    badge.add_css_class("badge");
+    badge.set_valign(Align::Center);
+    badge.set_visible(false);
+    row.append(&sel_bar);
     row.append(&icon);
     row.append(&col);
-    row.append(&chips);
+    row.append(&badge);
     li.set_child(Some(&row));
     // 安全性：键 "yihu-row" 只在本文件 setup/bind 中使用，类型恒为 Row
     unsafe {
         li.set_data(
             "yihu-row",
             Row {
+                sel_bar,
                 icon,
                 col,
                 title,
                 sub,
-                chips,
+                badge,
             },
         )
     };
@@ -1295,60 +1221,196 @@ fn bind_row(_: &gtk::SignalListItemFactory, obj: &glib::Object, deps: &Rc<Deps>,
         let ptr = li.data::<Row>("yihu-row").expect("row data");
         ptr.as_ref()
     };
+    let _ = (deps, slot); // 徽章化后 bind 不再需要闭包上下文（保留签名适配工厂）
     match item.kind().as_str() {
-        // 小节标题：灰字小号，不可激活
+        // 小节标题（搜索场景已不用；保留兜底）：灰字小号，不可激活
         "header" => {
+            row.sel_bar.set_visible(false);
             row.icon.set_visible(false);
-            row.chips.set_visible(false);
+            row.badge.set_visible(false);
             row.col.set_visible(true);
             row.sub.set_visible(false);
             row.title.set_text(&item.title());
             row.title.add_css_class("section-header");
         }
-        // 最近胶囊行：最近用过的应用/能力，点击即触发
-        "recent_chips" => {
-            row.icon.set_visible(false);
-            row.col.set_visible(false);
-            row.chips.set_visible(true);
-            while let Some(c) = row.chips.first_child() {
-                row.chips.remove(&c);
-            }
-            for b in recent_chip_buttons(deps, slot) {
-                row.chips.append(&b);
-            }
-        }
-        // 快捷能力胶囊行
-        "chips" => {
-            row.icon.set_visible(false);
-            row.col.set_visible(false);
-            row.chips.set_visible(true);
-            while let Some(c) = row.chips.first_child() {
-                row.chips.remove(&c);
-            }
-            for b in chip_buttons(deps, slot) {
-                row.chips.append(&b);
-            }
-        }
-        // 普通条目：图标 + 标题 + 副标题
+        // 普通条目：选中条 + 图标 + 标题/副标题 + 行尾类型徽章
         _ => {
+            row.sel_bar.set_visible(true);
             row.icon.set_visible(true);
             row.col.set_visible(true);
-            row.chips.set_visible(false);
             row.title.remove_css_class("section-header");
             row.title.set_text(&item.title());
             row.sub.set_visible(true);
             row.sub.set_text(&item.subtitle());
             row.icon.set_from_gicon(&gicon_for_spec(&item.icon_spec()));
+            let (text, class) = badge_for(item.kind().as_str(), &item.payload());
+            row.badge.set_visible(!text.is_empty());
+            row.badge.set_text(&text);
+            row.badge.remove_css_class("plugin");
+            row.badge.remove_css_class("calc");
+            if !class.is_empty() {
+                row.badge.add_css_class(class);
+            }
         }
     }
 }
 
+/// 行尾徽章文本与样式类：应用/能力/算式/插件名（插件行 payload = id|payload）
+fn badge_for(kind: &str, payload: &str) -> (String, &'static str) {
+    match kind {
+        "app" => ("应用".into(), ""),
+        "cap" => ("能力".into(), ""),
+        "calc" => ("算式".into(), "calc"),
+        "plugin" => {
+            let id = payload.split('|').next().unwrap_or("插件");
+            (format!("{id}"), "plugin")
+        }
+        _ => (String::new(), ""),
+    }
+}
+
+// ---- 默认页：常用应用图标墙 + 能力宫格 ----
+
+fn section_label(text: &str) -> gtk::Label {
+    let l = gtk::Label::new(Some(text));
+    l.add_css_class("section-label");
+    l.set_halign(Align::Start);
+    l.set_margin_start(6);
+    l
+}
+
+/// 常用应用墙：最近使用（历史时间序）优先补齐到 8 个，tile 点击即启动。
+fn build_app_wall(deps: &Rc<Deps>, slot: &Slot) -> gtk::FlowBox {
+    let flow = gtk::FlowBox::new();
+    flow.add_css_class("appwall");
+    flow.set_homogeneous(true);
+    flow.set_max_children_per_line(8);
+    flow.set_min_children_per_line(4);
+    flow.set_column_spacing(4);
+    flow.set_row_spacing(2);
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_activate_on_single_click(true);
+
+    let entries = deps.entries.borrow().clone();
+    // 最近使用的应用（app kind）优先；不足 8 个用完整应用列表顺序补齐
+    let mut picks: Vec<PanelEntry> = recent_entries(&deps.history.borrow(), &entries, 8)
+        .into_iter()
+        .filter(|e| e.kind == "app")
+        .collect();
+    for e in &entries {
+        if picks.len() >= 8 {
+            break;
+        }
+        if e.kind == "app" && !picks.iter().any(|p| p.payload == e.payload) {
+            picks.push(e.clone());
+        }
+    }
+    for e in picks {
+        let b = gtk::Button::new();
+        b.add_css_class("tile");
+        b.set_has_frame(false);
+        let v = GtkBox::new(Orientation::Vertical, 4);
+        v.set_halign(Align::Center);
+        let img = gtk::Image::new();
+        img.set_pixel_size(36);
+        img.set_from_gicon(&gicon_for_spec(&e.icon_spec));
+        let name = gtk::Label::new(Some(&e.title));
+        name.add_css_class("tile-name");
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        name.set_max_width_chars(8);
+        v.append(&img);
+        v.append(&name);
+        b.set_child(Some(&v));
+        let deps = deps.clone();
+        let slot = slot.clone();
+        let entry = e;
+        b.connect_clicked(move |_| {
+            perform_entry(&deps, &slot, &entry);
+        });
+        flow.append(&b);
+    }
+    flow
+}
+
+/// 能力宫格：深浅色/中心/深链 + 截图·锁屏·夜灯等高频系统命令（4 列）。
+fn build_cap_grid(deps: &Rc<Deps>, slot: &Slot) -> gtk::FlowBox {
+    const TILES: &[(&str, &str, &str)] = &[
+        ("theme:dark", "深色", "weather-clear-night-symbolic"),
+        ("theme:light", "浅色", "weather-clear-symbolic"),
+        ("page:radio", "广播", "applications-multimedia-symbolic"),
+        ("page:autodark", "主题页", "night-light-symbolic"),
+        ("sys:screenshot", "截图", "camera-photo-symbolic"),
+        ("sys:lock", "锁屏", "system-lock-screen-symbolic"),
+        ("sys:night-light", "夜灯", "night-light-symbolic"),
+        ("center", "中心", "tools.yihu.desktop"),
+    ];
+    let flow = gtk::FlowBox::new();
+    flow.add_css_class("capgrid");
+    flow.set_homogeneous(true);
+    flow.set_max_children_per_line(4);
+    flow.set_min_children_per_line(4);
+    flow.set_column_spacing(6);
+    flow.set_row_spacing(6);
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_activate_on_single_click(true);
+
+    for (payload, label, icon) in TILES {
+        // 系统插件停用（syscmd 等）时对应 tile 不出现
+        if !deps.sys_plugins.borrow().contains(providers::owner_of(payload)) {
+            continue;
+        }
+        let b = gtk::Button::new();
+        b.add_css_class("tile");
+        let h = GtkBox::new(Orientation::Horizontal, 8);
+        h.set_halign(Align::Center);
+        let img = gtk::Image::from_icon_name(icon);
+        img.set_pixel_size(18);
+        let l = gtk::Label::new(Some(label));
+        l.add_css_class("tile-name");
+        h.append(&img);
+        h.append(&l);
+        b.set_child(Some(&h));
+        let deps = deps.clone();
+        let slot = slot.clone();
+        let payload = payload.to_string();
+        b.connect_clicked(move |_| {
+            providers::activate_capability(&payload, &deps.center);
+            record(&deps.history, &format!("cap:{payload}"));
+            hide_panel(&deps, &slot);
+        });
+        flow.append(&b);
+    }
+    flow
+}
+
+/// 底部键提示栏
+fn key_bar() -> GtkBox {
+    let bar = GtkBox::new(Orientation::Horizontal, 10);
+    bar.add_css_class("keybar");
+    bar.set_halign(Align::Center);
+    let item = |key: &str, hint: &str, bar: &GtkBox| {
+        let k = gtk::Label::new(Some(key));
+        k.add_css_class("kbd");
+        let h = gtk::Label::new(Some(hint));
+        h.add_css_class("kbd-hint");
+        let cell = GtkBox::new(Orientation::Horizontal, 4);
+        cell.append(&k);
+        cell.append(&h);
+        bar.append(&cell);
+    };
+    item("↑↓", "选择", &bar);
+    item("↵", "打开", &bar);
+    item("Esc", "关闭", &bar);
+    bar
+}
+
 struct Row {
+    sel_bar: GtkBox,
     icon: gtk::Image,
     col: GtkBox,
     title: gtk::Label,
     sub: gtk::Label,
-    chips: GtkBox,
+    badge: gtk::Label,
 }
 
 // ---- 列表条目 GObject ----
@@ -1401,16 +1463,37 @@ impl PanelItem {
     }
 }
 
-fn load_css() {
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(include_str!("style.css"));
-    if let Some(display) = gtk::gdk::Display::default() {
+thread_local! {
+    /// 当前已挂到 display 的样式表 provider（accent/主题变化时替换）
+    static CSS_PROVIDER: std::cell::RefCell<Option<gtk::CssProvider>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 按「深浅 + 系统强调色」重建注入样式表（UI 重设计：动态主题）。
+fn apply_css() {
+    let dark = gio::Settings::new("org.gnome.desktop.interface")
+        .string("color-scheme")
+        .as_str()
+        == "prefer-dark";
+    let css = crate::theme::build_css(dark, crate::theme::detect_accent());
+    CSS_PROVIDER.with(|slot| {
+        let display = match gtk::gdk::Display::default() {
+            Some(d) => d,
+            None => return,
+        };
+        let mut cur = slot.borrow_mut();
+        if let Some(old) = cur.take() {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&css);
         gtk::style_context_add_provider_for_display(
             &display,
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
-    }
+        *cur = Some(provider);
+    });
 }
 
 #[cfg(test)]
