@@ -1,12 +1,15 @@
-//! 中心「主题切换」页：由独立版 autodark GUI 平移而来。
+//! 中心「主题切换」页：自动深浅色配置（2026-10-09 UI 重构）。
 //!
 //! 配置写入 `~/.config/yihu/autodark.conf`（旧版 `minitools` 路径自动迁移），启停 systemd 用户
 //! 定时器；实际切换由无 UI 的 `autodark-agent` 每分钟执行。
+//!
+//! 视觉语言：主卡（开关 + 三列状态摘要 + 应用按钮）+ 双模式选中卡
+//!（整卡可点，选中态强调色描边）；时间选择用紧凑下拉。
 
 use adw::prelude::*;
 use gtk::{
-    Align, Box as GtkBox, Button, CheckButton, Entry, Grid, Label, Orientation,
-    SpinButton, Switch,
+    Align, Box as GtkBox, Button, CheckButton, DropDown, Entry, Label, Orientation,
+    StringList, Switch,
 };
 use gtk::glib;
 use std::fs;
@@ -29,12 +32,12 @@ struct Ui {
     state_caption: Label,
     rb_custom: CheckButton,
     rb_sun: CheckButton,
-    custom_box: GtkBox,
-    sun_box: GtkBox,
-    light_h: SpinButton,
-    light_m: SpinButton,
-    dark_h: SpinButton,
-    dark_m: SpinButton,
+    card_custom: GtkBox,
+    card_sun: GtkBox,
+    light_h: DropDown,
+    light_m: DropDown,
+    dark_h: DropDown,
+    dark_m: DropDown,
     lat_entry: Entry,
     lon_entry: Entry,
     sun_info: Label,
@@ -43,13 +46,38 @@ struct Ui {
     timer_state: Label,
 }
 
+const HOURS: &[&str] = &[
+    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14",
+    "15", "16", "17", "18", "19", "20", "21", "22", "23",
+];
+const MINUTES: &[&str] = &["00", "05", "10", "15", "20", "25", "30", "35", "40", "45", "50", "55"];
+
+fn hm_dropdown(items: &[&str], value: u32) -> DropDown {
+    let d = DropDown::new(Some(StringList::new(items)), None::<&gtk::Expression>);
+    let idx = items
+        .iter()
+        .position(|s| s.parse::<u32>().ok() == Some(value))
+        .unwrap_or(0);
+    d.set_selected(idx as u32);
+    d.add_css_class("hm-drop");
+    d
+}
+
+fn dropdown_value(d: &DropDown) -> u32 {
+    // 两个列表都是纯数字字符串，直接解析选中项文本
+    d.selected_item()
+        .and_downcast::<gtk::StringObject>()
+        .map(|o| o.string().parse::<u32>().unwrap_or(0))
+        .unwrap_or(0)
+}
+
 impl Ui {
     fn collect(&self) -> Config {
         let mut c = Config {
             enabled: self.enable_switch.is_active(),
             mode: if self.rb_sun.is_active() { Mode::Sun } else { Mode::Custom },
-            light_time: (self.light_h.value() as u32, self.light_m.value() as u32),
-            dark_time: (self.dark_h.value() as u32, self.dark_m.value() as u32),
+            light_time: (dropdown_value(&self.light_h), dropdown_value(&self.light_m)),
+            dark_time: (dropdown_value(&self.dark_h), dropdown_value(&self.dark_m)),
             latitude: self.lat_entry.text().parse().unwrap_or(30.66),
             longitude: self.lon_entry.text().parse().unwrap_or(104.06),
         };
@@ -78,7 +106,7 @@ impl Ui {
                 &autodark::next_transition(&cfg, &now)
                     .map(|(t, th)| {
                         let mins = ((t - now.hours()) * 60.0).round().max(0.0) as i64;
-                        format!("{} → {}（{}）", fmt_hm(t), th.name(), fmt_dur(mins))
+                        format!("{} {}（{}）", fmt_hm(t), th.name(), fmt_dur(mins))
                     })
                     .unwrap_or_else(|| "无法计算".into()),
             );
@@ -104,7 +132,7 @@ impl Ui {
         );
 
         self.state_caption.set_text(if cfg.enabled {
-            "自动切换已启用，定时器每分钟核对一次主题"
+            "自动切换已启用，每分钟核对一次"
         } else {
             "自动切换未启用"
         });
@@ -118,12 +146,12 @@ impl Ui {
 pub fn build_page() -> gtk::Widget {
     let cfg = Config::load();
 
-    // —— 卡片：切换 ——
+    // ============ 主卡：开关 + 状态摘要 + 应用 ============
     let switch_card = card();
     let row = GtkBox::new(Orientation::Horizontal, 12);
     let title_col = GtkBox::new(Orientation::Vertical, 2);
-    let t = Label::new(Some("启用自动主题切换"));
-    t.add_css_class("row-title");
+    let t = Label::new(Some("自动主题切换"));
+    t.add_css_class("title-3");
     let state_caption = Label::new(Some("自动切换未启用"));
     state_caption.add_css_class("dim-label");
     state_caption.add_css_class("caption-sm");
@@ -134,54 +162,78 @@ pub fn build_page() -> gtk::Widget {
     let enable_switch = Switch::new();
     enable_switch.set_active(cfg.enabled);
     enable_switch.set_valign(Align::Center);
+    enable_switch.set_margin_end(4);
     row.append(&title_col);
     row.append(&enable_switch);
     switch_card.append(&row);
 
-    // —— 卡片：模式 ——
-    let mode_card = card();
+    // 状态三列摘要（load-chip 风格）
+    let chips = GtkBox::new(Orientation::Horizontal, 10);
+    chips.set_homogeneous(true);
+    let (c1, cur_theme) = summary_chip("当前主题");
+    let (c2, next_switch) = summary_chip("下次切换");
+    let (c3, timer_state) = summary_chip("定时器");
+    chips.append(&c1);
+    chips.append(&c2);
+    chips.append(&c3);
+    switch_card.append(&chips);
+
+    let apply_row = GtkBox::new(Orientation::Horizontal, 8);
+    let hint = Label::new(Some("配置修改即时保存，启用后立即生效"));
+    hint.add_css_class("dim-label");
+    hint.add_css_class("caption-sm");
+    hint.set_hexpand(true);
+    hint.set_halign(Align::Start);
+    hint.set_valign(Align::Center);
+    hint.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let apply_btn = Button::with_label("立即应用");
+    apply_btn.add_css_class("suggested-action");
+    apply_btn.add_css_class("pill");
+    apply_row.append(&hint);
+    apply_row.append(&apply_btn);
+    switch_card.append(&apply_row);
+
+    // ============ 双模式选中卡 ============
+    let mode_row = GtkBox::new(Orientation::Horizontal, 14);
+    mode_row.set_homogeneous(true);
+
     let rb_custom = CheckButton::with_label("自定义时间");
-    let rb_sun = CheckButton::with_label("日出至日落（根据地理坐标）");
+    let rb_sun = CheckButton::with_label("日出至日落");
     rb_sun.set_group(Some(&rb_custom));
     match cfg.mode {
         Mode::Custom => rb_custom.set_active(true),
         Mode::Sun => rb_sun.set_active(true),
     }
-    mode_card.append(&rb_custom);
 
-    let custom_box = GtkBox::new(Orientation::Vertical, 6);
-    let grid = Grid::new();
-    grid.set_column_spacing(8);
-    grid.set_row_spacing(6);
-    grid.set_margin_start(28);
-    let mk_spin = |v: u32| {
-        let s = SpinButton::with_range(0.0, 59.0, 1.0);
-        s.set_value(v as f64);
-        s.add_css_class("spin-hm");
-        s
-    };
-    let light_h = mk_spin(cfg.light_time.0);
-    let light_m = mk_spin(cfg.light_time.1);
-    let dark_h = mk_spin(cfg.dark_time.0);
-    let dark_m = mk_spin(cfg.dark_time.1);
-    let mk_label = |s: &str| {
-        let l = Label::new(Some(s));
+    // —— 自定义时间卡 ——
+    let card_custom = mode_card(&rb_custom, "固定时刻切换浅色 / 深色主题");
+    let time_grid = GtkBox::new(Orientation::Vertical, 8);
+    let mk_row = |label: &str, h: DropDown, m: DropDown| {
+        let r = GtkBox::new(Orientation::Horizontal, 8);
+        let l = Label::new(Some(label));
         l.set_valign(Align::Center);
-        l
+        l.set_width_chars(3);
+        r.append(&l);
+        r.append(&h);
+        let colon = Label::new(Some("∶"));
+        colon.set_valign(Align::Center);
+        r.append(&colon);
+        r.append(&m);
+        r
     };
-    grid.attach(&mk_label("浅色"), 0, 0, 1, 1);
-    grid.attach(&light_h, 1, 0, 1, 1);
-    grid.attach(&mk_label(":"), 2, 0, 1, 1);
-    grid.attach(&light_m, 3, 0, 1, 1);
-    grid.attach(&mk_label("深色"), 0, 1, 1, 1);
-    grid.attach(&dark_h, 1, 1, 1, 1);
-    grid.attach(&mk_label(":"), 2, 1, 1, 1);
-    grid.attach(&dark_m, 3, 1, 1, 1);
-    custom_box.append(&grid);
-    mode_card.append(&custom_box);
+    let light_h = hm_dropdown(HOURS, cfg.light_time.0);
+    let light_m = hm_dropdown(MINUTES, cfg.light_time.1);
+    let dark_h = hm_dropdown(HOURS, cfg.dark_time.0);
+    let dark_m = hm_dropdown(MINUTES, cfg.dark_time.1);
+    time_grid.append(&mk_row("浅色", light_h.clone(), light_m.clone()));
+    time_grid.append(&mk_row("深色", dark_h.clone(), dark_m.clone()));
+    time_grid.set_margin_top(10);
+    time_grid.set_margin_start(26);
+    card_custom.append(&time_grid);
 
-    mode_card.append(&rb_sun);
-    let sun_box = GtkBox::new(Orientation::Vertical, 6);
+    // —— 日出至日落卡 ——
+    let card_sun = mode_card(&rb_sun, "按地理位置的日出日落自动切换");
+    let sun_box = GtkBox::new(Orientation::Vertical, 8);
     let coord_row = GtkBox::new(Orientation::Horizontal, 8);
     let lat_entry = Entry::new();
     lat_entry.set_text(&format!("{}", cfg.latitude));
@@ -189,38 +241,28 @@ pub fn build_page() -> gtk::Widget {
     let lon_entry = Entry::new();
     lon_entry.set_text(&format!("{}", cfg.longitude));
     lon_entry.add_css_class("coord");
+    let mk_label = |s: &str| {
+        let l = Label::new(Some(s));
+        l.set_valign(Align::Center);
+        l
+    };
     coord_row.append(&mk_label("纬度"));
     coord_row.append(&lat_entry);
     coord_row.append(&mk_label("经度"));
     coord_row.append(&lon_entry);
-    coord_row.set_margin_start(28);
+    coord_row.set_margin_top(10);
+    coord_row.set_margin_start(26);
     sun_box.append(&coord_row);
     let sun_info = Label::new(Some("—"));
     sun_info.add_css_class("dim-label");
-    sun_info.set_margin_start(28);
+    sun_info.add_css_class("caption-sm");
+    sun_info.set_margin_start(26);
+    sun_info.set_halign(Align::Start);
     sun_box.append(&sun_info);
-    mode_card.append(&sun_box);
+    card_sun.append(&sun_box);
 
-    // —— 卡片：状态 ——
-    let st_card = card();
-    let (cur_row, cur_theme) = status_row("当前主题");
-    let (next_row, next_switch) = status_row("下次切换");
-    let (timer_row, timer_state) = status_row("定时器");
-    st_card.append(&cur_row);
-    st_card.append(&next_row);
-    st_card.append(&timer_row);
-    let apply_row = GtkBox::new(Orientation::Horizontal, 8);
-    let hint = Label::new(Some("配置修改即时保存；启用后立即生效，此后每分钟核对。"));
-    hint.add_css_class("dim-label");
-    hint.add_css_class("caption-sm");
-    hint.set_hexpand(true);
-    hint.set_halign(Align::Start);
-    hint.set_valign(Align::Center);
-    let apply_btn = Button::with_label("立即应用");
-    apply_btn.add_css_class("suggested-action");
-    apply_row.append(&hint);
-    apply_row.append(&apply_btn);
-    st_card.append(&apply_row);
+    mode_row.append(&card_custom);
+    mode_row.append(&card_sun);
 
     // —— 布局 ——
     let main_box = GtkBox::new(Orientation::Vertical, 14);
@@ -229,7 +271,7 @@ pub fn build_page() -> gtk::Widget {
     main_box.set_margin_start(24);
     main_box.set_margin_end(24);
     main_box.set_valign(Align::Start);
-    for c in [&switch_card, &mode_card, &st_card] {
+    for c in [&switch_card, &mode_row] {
         c.set_hexpand(true);
         main_box.append(c);
     }
@@ -239,8 +281,8 @@ pub fn build_page() -> gtk::Widget {
         state_caption,
         rb_custom: rb_custom.clone(),
         rb_sun: rb_sun.clone(),
-        custom_box: custom_box.clone(),
-        sun_box: sun_box.clone(),
+        card_custom: card_custom.clone(),
+        card_sun: card_sun.clone(),
         light_h,
         light_m,
         dark_h,
@@ -277,14 +319,24 @@ pub fn build_page() -> gtk::Widget {
     for rb in [&ui.rb_custom, &ui.rb_sun] {
         let ui_c = ui.clone();
         rb.connect_toggled(move |_| {
-            sync_mode_visibility(&ui_c);
+            sync_mode_style(&ui_c);
             ui_c.save();
             ui_c.refresh();
         });
     }
-    for sp in [&ui.light_h, &ui.light_m, &ui.dark_h, &ui.dark_m] {
+    // 整卡可点：点击卡片任意处切到该模式
+    for (card, rb) in [(&ui.card_custom, &ui.rb_custom), (&ui.card_sun, &ui.rb_sun)] {
+        let rb = rb.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.connect_pressed(move |g, _, _, _| {
+            rb.set_active(true);
+            g.set_state(gtk::EventSequenceState::Claimed);
+        });
+        card.add_controller(gesture);
+    }
+    for d in [&ui.light_h, &ui.light_m, &ui.dark_h, &ui.dark_m] {
         let ui_c = ui.clone();
-        sp.connect_value_changed(move |_| {
+        d.connect_selected_notify(move |_| {
             ui_c.save();
             ui_c.refresh();
         });
@@ -312,16 +364,52 @@ pub fn build_page() -> gtk::Widget {
         });
     }
 
-    sync_mode_visibility(&ui);
+    sync_mode_style(&ui);
     ui.refresh();
 
     page_shell("主题切换", &crate::scroll_clamp(&main_box, 760))
 }
 
-fn sync_mode_visibility(ui: &Ui) {
+fn sync_mode_style(ui: &Ui) {
     let sun = ui.rb_sun.is_active();
-    ui.custom_box.set_visible(!sun);
-    ui.sun_box.set_visible(sun);
+    ui.card_custom.remove_css_class("mode-selected");
+    ui.card_sun.remove_css_class("mode-selected");
+    if sun {
+        ui.card_sun.add_css_class("mode-selected");
+    } else {
+        ui.card_custom.add_css_class("mode-selected");
+    }
+}
+
+/// 模式卡：radio + 标题 + 描述，选中态由 sync_mode_style 加 mode-selected 类
+fn mode_card(rb: &CheckButton, desc: &str) -> GtkBox {
+    let b = GtkBox::new(Orientation::Vertical, 4);
+    b.add_css_class("card");
+    b.add_css_class("mode-card");
+    rb.set_halign(Align::Start);
+    b.append(rb);
+    let d = Label::new(Some(desc));
+    d.add_css_class("caption-sm");
+    d.add_css_class("dim-label");
+    d.set_halign(Align::Start);
+    d.set_margin_start(26);
+    b.append(&d);
+    b
+}
+
+/// 状态摘要 chip：上方小字标签 + 下方粗体值
+fn summary_chip(label: &str) -> (GtkBox, Label) {
+    let b = GtkBox::new(Orientation::Vertical, 2);
+    b.add_css_class("load-chip");
+    let l = Label::new(Some(label));
+    l.add_css_class("caption-sm");
+    l.add_css_class("dim-label");
+    let v = Label::new(Some("–"));
+    v.add_css_class("row-title");
+    v.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    b.append(&l);
+    b.append(&v);
+    (b, v)
 }
 
 fn run_apply(cfg: &Config) {
@@ -391,19 +479,6 @@ fn card() -> GtkBox {
     b.add_css_class("card");
     b.add_css_class("card-pad");
     b
-}
-
-fn status_row(title: &str) -> (GtkBox, Label) {
-    let row = GtkBox::new(Orientation::Horizontal, 8);
-    let t = Label::new(Some(title));
-    t.add_css_class("dim-label");
-    t.set_hexpand(true);
-    t.set_halign(Align::Start);
-    let v = Label::new(Some("–"));
-    v.add_css_class("row-title");
-    row.append(&t);
-    row.append(&v);
-    (row, v)
 }
 
 fn fmt_hm(h: f64) -> String {

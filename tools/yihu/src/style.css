@@ -38,8 +38,25 @@
   font-weight: 700;
 }
 
-spinbutton.spin-hm {
-  min-width: 74px;
+/* 模式选中卡：整卡可点，选中态强调色描边 */
+.mode-card {
+  padding: 14px;
+}
+.mode-card.mode-selected {
+  border: 2px solid @accent_color;
+  background: alpha(@accent_color, 0.06);
+}
+.mode-card radio {
+  margin: 0;
+}
+
+/* 时间下拉：紧凑等宽数字 */
+dropdown.hm-drop {
+  min-width: 64px;
+}
+dropdown.hm-drop > button {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 entry.coord {
