@@ -469,6 +469,7 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
     win.set_title(Some("一呼"));
     win.set_icon_name(Some("tools.yihu.desktop"));
     win.set_resizable(false);
+    win.set_decorated(false); // 无标题栏：启动器是浮层，Esc/失焦即收起
     win.set_hide_on_close(true);
     win.add_css_class("panel-root");
 
@@ -1317,7 +1318,7 @@ fn build_app_wall(deps: &Rc<Deps>, slot: &Slot) -> gtk::FlowBox {
         let name = gtk::Label::new(Some(&e.title));
         name.add_css_class("tile-name");
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        name.set_max_width_chars(8);
+        name.set_max_width_chars(10);
         v.append(&img);
         v.append(&name);
         b.set_child(Some(&v));
