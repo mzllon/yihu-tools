@@ -78,3 +78,33 @@ progressbar > trough {
   background: alpha(@window_fg_color, 0.10);
   border: none;
 }
+
+/* —— 插件中心卡片（对标 uTools 插件中心形态）—— */
+.plugin-card {
+  border-radius: 12px;
+  padding: 12px;
+  background: alpha(@window_fg_color, 0.04);
+  transition: background 120ms ease;
+}
+.plugin-card:hover {
+  background: alpha(@window_fg_color, 0.07);
+}
+.plugin-icon {
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 10px;
+  background: alpha(@window_fg_color, 0.08);
+  padding: 5px;
+}
+.perm-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: alpha(@accent_color, 0.14);
+  color: @accent_color;
+}
+.perm-badge.dim {
+  background: alpha(@window_fg_color, 0.06);
+  color: alpha(@window_fg_color, 0.5);
+}
