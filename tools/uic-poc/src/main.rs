@@ -15,6 +15,7 @@
 //! 呼出延迟不得明显劣化面板整体指标；超线直接取原生模板，不折衷。
 
 use gtk::prelude::*;
+use webkit6::prelude::*;
 use gtk::{Align, Box as GtkBox, Image, Label, Orientation, Window};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

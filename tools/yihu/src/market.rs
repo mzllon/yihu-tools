@@ -49,8 +49,39 @@ pub fn parse_registry(text: &str) -> Result<Vec<MarketPlugin>, String> {
     Ok(root.plugins)
 }
 
-/// 拉取并解析 registry（阻塞调用，只准后台线程用）
+/// GitHub raw → jsdelivr 镜像改写（国内网络实测：raw 对较大文件常超时，
+/// jsdelivr 稳定）。规则化处理任意 raw URL，非 raw 返回 None。
+pub fn mirror_url(url: &str) -> Option<String> {
+    const RAW_PREFIX: &str = "https://raw.githubusercontent.com/";
+    let rest = url.strip_prefix(RAW_PREFIX)?;
+    // raw: <owner>/<repo>/<branch>/<path> → jsdelivr: gh/<owner>/<repo>@<branch>/<path>
+    let mut it = rest.splitn(4, '/');
+    let owner = it.next()?;
+    let repo = it.next()?;
+    let branch = it.next()?;
+    let path = it.next()?;
+    if owner.is_empty() || repo.is_empty() || branch.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"))
+}
+
+/// 带镜像回退的拉取：直连失败且 URL 可镜像时自动换 jsdelivr 再试
+///（端到端实测驱动：raw 拉 zip 超时、镜像 5.8s 全量到达）。
 pub fn fetch_registry(url: &str) -> Result<Vec<MarketPlugin>, String> {
+    let primary = fetch_registry_once(url);
+    if primary.is_ok() {
+        return primary;
+    }
+    if let Some(mirror) = mirror_url(url) {
+        eprintln!("market: 直连失败，回退镜像 {mirror}");
+        return fetch_registry_once(&mirror)
+            .map_err(|e| format!("直连与镜像均失败（镜像错误：{e}）"));
+    }
+    primary
+}
+
+fn fetch_registry_once(url: &str) -> Result<Vec<MarketPlugin>, String> {
     let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(15))
         .call()
@@ -62,9 +93,24 @@ pub fn fetch_registry(url: &str) -> Result<Vec<MarketPlugin>, String> {
     parse_registry(&text)
 }
 
-/// 下载 zip 到目标路径（阻塞调用，只准后台线程用）。体积上限 64 MiB
-/// 与 zipfile::MAX_ZIP_BYTES 一致，超限即中止。
+/// 下载 zip 到目标路径，带镜像回退（同 fetch_registry）。
 pub fn download_to(url: &str, dest: &Path) -> Result<u64, String> {
+    match download_once(url, dest) {
+        Ok(n) => Ok(n),
+        Err(primary_err) => match mirror_url(url) {
+            Some(mirror) => {
+                eprintln!("market: 下载直连失败，回退镜像 {mirror}");
+                download_once(&mirror, dest)
+                    .map_err(|e| format!("直连与镜像均失败（镜像错误：{e}）"))
+            }
+            None => Err(primary_err),
+        },
+    }
+}
+
+fn download_once(url: &str, dest: &Path) -> Result<u64, String> {
+    // 清理上次回退可能留下的半截文件（append 语义要求空文件起步）
+    let _ = std::fs::remove_file(dest);
     let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(60))
         .call()
@@ -139,6 +185,36 @@ mod tests {
         assert!(parse_registry(garbage).unwrap_err().contains("解析失败"));
         let empty = "{}";
         assert!(parse_registry(empty).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mirror_rewrites_raw_urls() {
+        assert_eq!(
+            mirror_url("https://raw.githubusercontent.com/mzllon/yihu-market/main/zips/a.zip"),
+            Some("https://cdn.jsdelivr.net/gh/mzllon/yihu-market@main/zips/a.zip".into())
+        );
+        assert_eq!(
+            mirror_url("https://raw.githubusercontent.com/a/b/master/x.json"),
+            Some("https://cdn.jsdelivr.net/gh/a/b@master/x.json".into())
+        );
+        // 非 raw / 残缺路径不改写
+        assert!(mirror_url("https://github.com/a/b").is_none());
+        assert!(mirror_url("https://raw.githubusercontent.com/a").is_none());
+        assert!(mirror_url("https://raw.githubusercontent.com/a/b/main/").is_none());
+    }
+
+    #[test]
+    fn live_fetch_via_mirror_fallback() {
+        // 端到端（真实网络）：raw 拉取可能超时，回退镜像必须能拿到
+        // 且解析出 ts-convert。网络不可用时跳过（CI 无外网场景）。
+        let list = match fetch_registry(DEFAULT_REGISTRY_URL) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("跳过：网络不可用（{e}）");
+                return;
+            }
+        };
+        assert!(list.iter().any(|p| p.id == "ts-convert"), "{list:?}");
     }
 
     #[test]

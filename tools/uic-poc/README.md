@@ -27,15 +27,25 @@ cargo build --release -p uic-poc --features web
 ./target/release/uic-poc bench
 ```
 
-## 已测基线（release，Ubuntu 26.04 / Wayland / GNOME 50，2026-10-07）
+## 决策记录（2026-10-09，数字齐备，规则预冻结→拍板）
 
-| 模式 | map_ms | 主进程 PSS | 辅助进程 PSS |
-|---|---|---|---|
-| native（原生模板） | 92–101 | ~33 MB | 0 |
+**UI 插件形态 = 原生模板**（宿主 GTK 渲染声明式 UI）。WebView 路线关闭。
 
-web 腿数字留待 `--features web` 构建后回填。**决策红线**（M4 计划）：
-空载 PSS 与呼出延迟不得明显劣化面板整体指标（待命 PSS ~20 MB、
-暖 toggle < 100 ms）；web 腿超线直接取原生模板，不折衷。
+实测（release，Ubuntu 26.04 / Wayland / GNOME 50，libwebkitgtk 2.52）：
+
+| 模式 | map_ms（冷启动+首帧） | 主进程 PSS | WebKit 辅助 PSS | 总 PSS |
+|---|---|---|---|---|
+| native | 92–115 | 33–44 MB | 0 | **38–44 MB** |
+| web | 160–224 | 71–72 MB | ~15 MB | **87 MB** |
+
+对照 M4 预冻结规则「web 超线直接取原生模板，不再折衷」：web 腿首帧
+慢 ~1.7 倍、空载 PSS 为 native 的 ~2 倍、达面板待命红线（~20 MB）的
+4 倍以上，双指标超线 → **native**。两次运行数字稳定，无偶然性。
+
+后续含义：
+- M5 UI 插件实现走原生模板（插件声明式描述 UI，宿主渲染）；
+- WebView 不做公开市场默认运行时；个别重型 UI 插件将来若确需 web，
+  作为显式声明 + 审核例外的形态再议（能力代理与沙箱要求不变）。
 
 补充观察项（数字之外，桌面手测）：
 - webkit 进程收起杀灭后的残留（应归零）；
