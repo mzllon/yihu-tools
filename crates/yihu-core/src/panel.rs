@@ -43,7 +43,7 @@ impl Default for Config {
         Config {
             hotkey: DEFAULT_HOTKEY.into(),
             screenshot_hotkey: DEFAULT_SCREENSHOT_HOTKEY.into(),
-            place_offset_up: 100,
+            place_offset_up: 0,
         }
     }
 }
@@ -430,7 +430,7 @@ mod tests {
         fs::write(&p, "# 注释\nbadline\n").unwrap();
         let c = Config::read_from(&p).unwrap();
         assert_eq!(c.hotkey, DEFAULT_HOTKEY);
-        assert_eq!(c.place_offset_up, 100);
+        assert_eq!(c.place_offset_up, 0);
         fs::remove_dir_all(&dir).ok();
     }
 

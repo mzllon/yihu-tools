@@ -1,5 +1,6 @@
 // 一呼面板定位扩展：把一呼面板（tools.yihu.Panel）摆到
-// 当前显示器「水平居中、垂直上 1/4 处」并置顶。
+// 当前显示器「整屏居中」（水平居中 + 垂直居中，offset_up 可再上移微调）
+// 并置顶。对标 uTools/Raycast 的全屏居中呼出位。
 //
 // Wayland 客户端无自我定位接口，此能力只能由合成器一侧（Shell 扩展）提供。
 // 摆放时机：常驻监听「窗口创建 / 尺寸变化」，面板窗口一出现（首帧绘制前）
@@ -131,7 +132,7 @@ export default class YihuPanelPlacerExtension {
         const w = frame.width > 0 ? frame.width : 720;
         const h = frame.height > 0 ? frame.height : 300;
         const x = mon.x + Math.round((mon.width - w) / 2);
-        const y = mon.y + Math.round((mon.height - h) / 4) - (this._offsetUp ?? 0);
+        const y = mon.y + Math.round((mon.height - h) / 2) - (this._offsetUp ?? 0);
         mw.move_frame(true, x, y);
         if (!mw.is_above()) {
             mw.make_above();

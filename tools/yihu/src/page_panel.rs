@@ -192,7 +192,8 @@ pub fn build_page() -> gtk::Widget {
     let pos_hint = Label::new(Some(
         "Wayland 下应用无法决定自己的位置：默认由系统摆放（位置不固定）。\n\
          安装定位扩展后（GNOME Shell 扩展，约 2KB，仅本用户），面板每次呼出\n\
-         自动摆到「水平居中、垂直上 1/4 处」并置顶。新装扩展需注销重新登录一次生效。",
+         自动摆到「当前屏幕正中」并置顶（对标 uTools）。新装/更新扩展后\n\
+         需注销重新登录一次生效。",
     ));
     pos_hint.add_css_class("dim-label");
     pos_hint.add_css_class("caption-sm");
