@@ -828,15 +828,26 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
             spawn_network_job(deps, &req, &url);
             return;
         }
-        Ok(crate::caps::CapAction::SettingsWrite { schema, key, value }) => {
+        Ok(crate::caps::CapAction::SettingsWrite { schema, key, value, op }) => {
             deps.audit.record(
                 &req.plugin,
                 req.gen,
                 &req.capability,
                 "grant",
-                &format!("{schema} {key}={value}"),
+                &format!("{op} {schema} {key}"),
             );
-            spawn_settings_job(deps, &req, &schema, &key, &value);
+            spawn_settings_job(deps, &req, &schema, &key, &value, &op);
+            return;
+        }
+        Ok(crate::caps::CapAction::SettingsRead { schema_spec, key }) => {
+            deps.audit.record(
+                &req.plugin,
+                req.gen,
+                &req.capability,
+                "grant",
+                &format!("{schema_spec} {key}"),
+            );
+            spawn_settings_read_job(deps, &req, &schema_spec, &key);
             return;
         }
         Ok(crate::caps::CapAction::FsWrite { path, text }) => {
@@ -922,16 +933,33 @@ fn spawn_network_job(deps: &Deps, req: &crate::sessions::CapRequest, url: &str) 
     });
 }
 
-/// settings.write：gsettings set（仅字符串值，schema 白名单已校验）。
-fn spawn_settings_job(deps: &Deps, req: &crate::sessions::CapRequest, schema: &str, key: &str, value: &str) {
+/// settings.write：gsettings set/reset（schema 白名单已校验）。
+fn spawn_settings_job(
+    deps: &Deps,
+    req: &crate::sessions::CapRequest,
+    schema: &str,
+    key: &str,
+    value: &str,
+    op: &str,
+) {
     let slot = deps.cap_async.clone();
     let plugin = req.plugin.clone();
     let gen = req.gen;
     let request_id = req.request_id;
-    let (schema, key, value) = (schema.to_string(), key.to_string(), value.to_string());
+    let (schema, key, value, op) = (
+        schema.to_string(),
+        key.to_string(),
+        value.to_string(),
+        op.to_string(),
+    );
     std::thread::spawn(move || {
         let out = std::process::Command::new("gsettings")
-            .args(["set", &schema, &key, &value])
+            .args([
+                if op == "reset" { "reset" } else { "set" },
+                &schema,
+                &key,
+            ])
+            .args(if op == "reset" { vec![] } else { vec![value.as_str()] })
             .stdin(std::process::Stdio::null())
             .output();
         let (ok, error) = match out {
@@ -955,6 +983,78 @@ fn spawn_settings_job(deps: &Deps, req: &crate::sessions::CapRequest, schema: &s
             png: None,
             clipboard: false,
             data: None,
+            notify: false,
+        });
+    });
+}
+
+/// settings.read：gsettings get（含 relocatable 子条目），值文本回传 data。
+fn spawn_settings_read_job(
+    deps: &Deps,
+    req: &crate::sessions::CapRequest,
+    schema_spec: &str,
+    key: &str,
+) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    let (schema_spec, key) = (schema_spec.to_string(), key.to_string());
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("gsettings")
+            .args(["get", &schema_spec, &key])
+            .stdin(std::process::Stdio::null())
+            .output();
+        let data = match out {
+            Ok(o) if o.status.success() => {
+                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                serde_json::to_string(&text).unwrap_or_else(|_| "null".into())
+            }
+            Ok(o) => {
+                let _ = o;
+                slot.lock().unwrap().push(CapOutcome {
+                    plugin,
+                    gen,
+                    request_id,
+                    ok: false,
+                    error: format!(
+                        "gsettings get 失败：{}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ),
+                    path: String::new(),
+                    png: None,
+                    clipboard: false,
+                    data: None,
+                    notify: false,
+                });
+                return;
+            }
+            Err(e) => {
+                slot.lock().unwrap().push(CapOutcome {
+                    plugin,
+                    gen,
+                    request_id,
+                    ok: false,
+                    error: format!("gsettings 启动失败：{e}"),
+                    path: String::new(),
+                    png: None,
+                    clipboard: false,
+                    data: None,
+                    notify: false,
+                });
+                return;
+            }
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            ok: true,
+            error: String::new(),
+            path: String::new(),
+            png: None,
+            clipboard: false,
+            data: Some(data),
             notify: false,
         });
     });
@@ -1076,6 +1176,7 @@ fn execute_capability(action: crate::caps::CapAction) -> Result<(), String> {
         crate::caps::CapAction::Screenshot { .. } => Ok(()),
         crate::caps::CapAction::NetworkFetch { .. } => Ok(()),
         crate::caps::CapAction::SettingsWrite { .. } => Ok(()),
+        crate::caps::CapAction::SettingsRead { .. } => Ok(()),
         crate::caps::CapAction::FsWrite { .. } => Ok(()),
     }
 }

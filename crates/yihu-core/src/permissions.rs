@@ -32,6 +32,8 @@ pub const SCREENSHOT_TAKE: &str = "screenshot.take";
 pub const NETWORK_FETCH: &str = "network.fetch";
 /// 经宿主写 gsettings（声明 schema 白名单，仅字符串值）
 pub const SETTINGS_WRITE: &str = "settings.write";
+/// 经宿主读 gsettings（声明 schema 白名单，含 relocatable 子条目）
+pub const SETTINGS_READ: &str = "settings.read";
 /// 经宿主写文件（声明路径 glob，UTF-8 文本，原子写）
 pub const FS_WRITE: &str = "fs.write";
 
@@ -45,11 +47,12 @@ pub const KNOWN: &[&str] = &[
     SCREENSHOT_TAKE,
     NETWORK_FETCH,
     SETTINGS_WRITE,
+    SETTINGS_READ,
     FS_WRITE,
 ];
 
 /// 允许带 @参数的能力基名
-pub const PARAMETRIC: &[&str] = &[NETWORK_FETCH, SETTINGS_WRITE, FS_WRITE];
+pub const PARAMETRIC: &[&str] = &[NETWORK_FETCH, SETTINGS_WRITE, SETTINGS_READ, FS_WRITE];
 
 /// 一条声明：基名 + 参数（无参能力 param 为 None）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,12 +119,12 @@ fn validate_param(cap: &str, p: &str) -> Result<(), String> {
             }
             Ok(())
         }
-        SETTINGS_WRITE => {
-            // gsettings schema：点分段，仅字母数字与点
+        SETTINGS_WRITE | SETTINGS_READ => {
+            // gsettings schema：点分段，字母数字与连字符（如 settings-daemon）
             if p.starts_with('.')
                 || p.ends_with('.')
                 || p.contains("..")
-                || !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+                || !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
             {
                 return Err(format!("schema 非法：{p}"));
             }
@@ -187,6 +190,7 @@ pub fn label(declared: &str) -> String {
             (SCREENSHOT_TAKE, _) => "截屏（经系统截图接口）".into(),
             (NETWORK_FETCH, Some(host)) => format!("访问网络 {host}"),
             (SETTINGS_WRITE, Some(schema)) => format!("改系统设置 {schema}"),
+            (SETTINGS_READ, Some(schema)) => format!("读系统设置 {schema}"),
             (FS_WRITE, Some(path)) => format!("写文件 {path}"),
             _ => d.capability,
         },

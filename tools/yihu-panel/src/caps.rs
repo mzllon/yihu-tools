@@ -41,8 +41,10 @@ pub enum CapAction {
     Screenshot { mode: String, clipboard: bool },
     /// 经宿主发 HTTP GET（url 的 host:port ∈ 声明集），响应文本回传
     NetworkFetch { url: String },
-    /// 经宿主写 gsettings（schema ∈ 声明集，仅字符串值）
-    SettingsWrite { schema: String, key: String, value: String },
+    /// 经宿主写 gsettings（schema ∈ 声明集，仅字符串值；op=set/reset）
+    SettingsWrite { schema: String, key: String, value: String, op: String },
+    /// 经宿主读 gsettings（schema_spec = schema[:reloc-path]，∈ 声明集）
+    SettingsRead { schema_spec: String, key: String },
     /// 经宿主写文件（路径匹配声明 glob，UTF-8 原子写）
     FsWrite { path: String, text: String },
 }
@@ -219,7 +221,14 @@ pub fn evaluate(
         perms::SETTINGS_WRITE => {
             let schema = get("schema")?;
             let key = get("key")?;
-            let value = get("value")?;
+            let op = params.get("op").and_then(|v| v.as_str()).unwrap_or("set");
+            if op != "set" && op != "reset" {
+                return Err(format!("op {op:?} 非法（set/reset）"));
+            }
+            let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            if op == "set" && value.is_empty() {
+                return Err("set 操作 value 不能为空".into());
+            }
             let schemas = perms::params_of(declared_raw, capability);
             if !schemas.iter().any(|s| s == schema) {
                 return Err(format!("schema {schema} 不在声明白名单"));
@@ -234,6 +243,38 @@ pub fn evaluate(
                 schema: schema.to_string(),
                 key: key.to_string(),
                 value: value.to_string(),
+                op: op.to_string(),
+            })
+        }
+        perms::SETTINGS_READ => {
+            // schema_spec = <schema>[:<reloc-path>]；base 必须在声明集内，
+            // reloc-path 仅字母数字/连字符/斜杠（条目路径）
+            let spec = get("schema")?;
+            let key = get("key")?;
+            let (base, reloc) = match spec.split_once(':') {
+                Some((b, p)) => (b, Some(p)),
+                None => (spec, None),
+            };
+            let schemas = perms::params_of(declared_raw, capability);
+            if !schemas.iter().any(|s| s == base) {
+                return Err(format!("schema {base} 不在声明白名单"));
+            }
+            if let Some(p) = reloc {
+                if !p.starts_with('/')
+                    || !p.ends_with('/')
+                    || !p
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '-' || c == '_')
+                {
+                    return Err(format!("relocatable 路径非法：{p:?}"));
+                }
+            }
+            if key.is_empty() || key.len() > 128 || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err(format!("key 非法：{key:?}"));
+            }
+            Ok(CapAction::SettingsRead {
+                schema_spec: spec.to_string(),
+                key: key.to_string(),
             })
         }
         perms::FS_WRITE => {
@@ -404,8 +445,29 @@ mod tests {
                 schema: "org.gnome.desktop.interface".into(),
                 key: "color-scheme".into(),
                 value: "prefer-dark".into(),
+                op: "set".into(),
             }
         );
+        // reset：无需 value
+        let a = evaluate(
+            &d,
+            perms::SETTINGS_WRITE,
+            &json!({"schema":"org.gnome.desktop.interface","key":"color-scheme","op":"reset"}),
+        )
+        .unwrap();
+        assert_eq!(a, CapAction::SettingsWrite {
+            schema: "org.gnome.desktop.interface".into(),
+            key: "color-scheme".into(),
+            value: String::new(),
+            op: "reset".into(),
+        });
+        // op 非法
+        assert!(evaluate(
+            &d,
+            perms::SETTINGS_WRITE,
+            &json!({"schema":"org.gnome.desktop.interface","key":"x","op":"delete"})
+        )
+        .is_err());
         // 其他 schema 拒绝
         assert!(evaluate(
             &d,
@@ -418,6 +480,67 @@ mod tests {
             &d,
             perms::SETTINGS_WRITE,
             &json!({"schema":"org.gnome.desktop.interface","key":"a b","value":"y"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn settings_read_enforces_schema_and_reloc() {
+        // relocatable 子 schema 与父 schema 是不同名字，声明制要求精确声明
+        let d = declared(&[
+            "settings.read@org.gnome.settings-daemon.plugins.media-keys",
+            "settings.read@org.gnome.settings-daemon.plugins.media-keys.custom-keybinding",
+        ]);
+        // base schema
+        let a = evaluate(
+            &d,
+            perms::SETTINGS_READ,
+            &json!({"schema":"org.gnome.settings-daemon.plugins.media-keys","key":"custom-keybindings"}),
+        )
+        .unwrap();
+        assert!(matches!(a, CapAction::SettingsRead { .. }));
+        // relocatable 子条目（base = 子 schema 名 ∈ 声明集）
+        evaluate(
+            &d,
+            perms::SETTINGS_READ,
+            &json!({"schema":"org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/","key":"name"}),
+        )
+        .unwrap();
+        // 子 schema 未声明 → 拒（即使父 schema 已声明）
+        let parent_only = declared(&[
+            "settings.read@org.gnome.settings-daemon.plugins.media-keys",
+        ]);
+        assert!(evaluate(
+            &parent_only,
+            perms::SETTINGS_READ,
+            &json!({"schema":"org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/x/","key":"name"})
+        )
+        .is_err(), "未声明的子 schema 应被拒");
+        // base 不在声明 → 拒
+        assert!(evaluate(
+            &d,
+            perms::SETTINGS_READ,
+            &json!({"schema":"org.gnome.shell","key":"x"})
+        )
+        .is_err());
+        // reloc path 形状非法
+        for bad in [
+            "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:relative/",
+            "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/abs/no-end",
+            "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/a/../b/",
+        ] {
+            assert!(evaluate(
+                &d,
+                perms::SETTINGS_READ,
+                &json!({"schema":bad,"key":"name"})
+            )
+            .is_err(), "{bad}");
+        }
+        // key 形状
+        assert!(evaluate(
+            &d,
+            perms::SETTINGS_READ,
+            &json!({"schema":"org.gnome.settings-daemon.plugins.media-keys","key":"has dot"})
         )
         .is_err());
     }
@@ -476,3 +599,4 @@ mod tests {
         assert_eq!(normalize_path("~root/x", home), None);
     }
 }
+

@@ -1,0 +1,17 @@
+id = "hotkeys"
+name = "快捷键管理"
+version = "0.1.0"
+api = "^1"
+entry = "hotkeys.py"
+icon = "input-keyboard-symbolic"
+
+[[triggers]]
+keywords = ["hotkey", "keybind", "快捷键", "kj"]
+
+permissions = [
+  "settings.read@org.gnome.settings-daemon.plugins.media-keys",
+  "settings.read@org.gnome.settings-daemon.plugins.media-keys.custom-keybinding",
+  "settings.write@org.gnome.settings-daemon.plugins.media-keys",
+  "settings.write@org.gnome.settings-daemon.plugins.media-keys.custom-keybinding",
+  "notify",
+]

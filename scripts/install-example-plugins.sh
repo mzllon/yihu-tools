@@ -34,4 +34,9 @@ mkdir -p "$REG/sys-theme"
 install -m755 "$ROOT/plugins/sys-theme/theme.py" "$REG/sys-theme/theme.py"
 install -m644 "$ROOT/plugins/sys-theme/manifest.toml" "$REG/sys-theme/manifest.toml"
 
-echo "已安装示例插件：ts-convert、passgen、sandbox-probe、screenshot、sys-theme（$REG）"
+# 快捷键管理（真插件旗舰示例：settings.read/write 编排，宿主无对应内置）
+mkdir -p "$REG/hotkeys"
+install -m755 "$ROOT/plugins/hotkeys/hotkeys.py" "$REG/hotkeys/hotkeys.py"
+install -m644 "$ROOT/plugins/hotkeys/manifest.toml" "$REG/hotkeys/manifest.toml"
+
+echo "已安装示例插件：ts-convert、passgen、sandbox-probe、screenshot、sys-theme、hotkeys（$REG）"

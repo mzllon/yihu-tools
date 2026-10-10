@@ -703,6 +703,14 @@ for line in sys.stdin:
                   "params": {"schema": "org.gnome.shell.extensions.dash",
                              "key": "x", "value": "y"}})
             continue
+        if text == "read":
+            rid = 5000 + m["id"]
+            pending[rid] = m["id"]
+            send({"type": "capability_request", "id": rid,
+                  "capability": "settings.read",
+                  "params": {"schema": "org.gnome.settings-daemon.plugins.media-keys",
+                             "key": "custom-keybindings"}})
+            continue
         if text == "write":
             rid = 4000 + m["id"]
             pending[rid] = m["id"]
@@ -726,7 +734,7 @@ for line in sys.stdin:
             title = "granted" if ok else "denied:" + m.get("error", "?")
             data = m.get("data")
             if data is not None:
-                title += ":" + str(data)[:40]
+                title += ":" + str(data)[:60]
             send({"type": "results", "query_id": qid,
                   "items": [{"title": title, "payload": "p"}]})
     elif t == "shutdown":
@@ -750,7 +758,7 @@ for line in sys.stdin:
             (
                 "fake-plugin",
                 "假插件",
-                "[\"clipboard.write\", \"selected_files.read\", \"settings.write@org.gnome.desktop.interface\", \"fs.write@~/.yihu-e2e-test/**/*.json\"]",
+                "[\"clipboard.write\", \"selected_files.read\", \"settings.write@org.gnome.desktop.interface\", \"fs.write@~/.yihu-e2e-test/**/*.json\", \"settings.read@org.gnome.settings-daemon.plugins.media-keys\"]",
                 false,
             ),
             ("plain-plugin", "素插件", "[]", true),
@@ -821,7 +829,18 @@ for line in sys.stdin:
     }
 
     fn reply(mgr: &mut PluginMgr, replied: &mut Replied, req: &CapRequest, ok: bool, error: &str) {
-        mgr.respond_gen(&req.plugin, req.gen, req.request_id, ok, error, None);
+        reply_data(mgr, replied, req, ok, error, None);
+    }
+
+    fn reply_data(
+        mgr: &mut PluginMgr,
+        replied: &mut Replied,
+        req: &CapRequest,
+        ok: bool,
+        error: &str,
+        data: Option<&str>,
+    ) {
+        mgr.respond_gen(&req.plugin, req.gen, req.request_id, ok, error, data);
         replied.insert((req.plugin.clone(), req.gen, req.request_id));
     }
 
@@ -934,6 +953,22 @@ for line in sys.stdin:
         reply(&mut mgr, &mut replied, &fw, true, "");
         wait_rows(&mut mgr, Duration::from_secs(10), |m| {
             m.latest_rows().iter().any(|r| r.title.starts_with("granted"))
+        });
+
+        // ③d settings.read：data 回传（gsettings get 的真实输出）
+        mgr.broadcast("read");
+        wait_for(&mut mgr, &mut acc, Duration::from_secs(10), |_, c| {
+            find_unreplied(c, &replied, |r| r.capability == "settings.read").is_some()
+        });
+        let rd = find_unreplied(&acc, &replied, |r| r.capability == "settings.read")
+            .unwrap()
+            .clone();
+        // 值文本 JSON 回传（gsettings get custom-keybindings 的 GVariant 列表）
+        let val = serde_json::to_string(&format!("{:?}", "[]"))
+            .unwrap_or_else(|_| "\"[\"".into());
+        reply_data(&mut mgr, &mut replied, &rd, true, "", Some(&val));
+        wait_rows(&mut mgr, Duration::from_secs(10), |m| {
+            m.latest_rows().iter().any(|r| r.title.starts_with("granted:"))
         });
 
         // ④ 未声明 screenshot.take → 拒绝路径（不触发真实截屏）
