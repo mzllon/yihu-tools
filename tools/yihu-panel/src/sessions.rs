@@ -33,10 +33,21 @@ pub const RESIDENT_IDLE_EXIT: Duration = Duration::from_secs(300);
 /// shutdown 后的宽限：仍不退出则组级 SIGKILL
 pub const RESIDENT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
+/// 插件请求渲染的 UI 表单（drain 第三槽，主线程渲染）
+#[derive(Debug)]
+pub struct UiShowRequest {
+    pub plugin: String,
+    pub gen: u64,
+    pub ui_id: u64,
+    pub spec: serde_json::Value,
+}
+
 pub enum PluginEvent {
     Results { plugin: String, query_id: u64, items: Vec<PanelEntry> },
     Exited { plugin: String, gen: u64 },
     Capability(CapRequest),
+    /// UI 插件层：插件请求宿主渲染声明式表单（api:1 加法扩展）
+    UiShow { plugin: String, gen: u64, ui_id: u64, spec: serde_json::Value },
 }
 
 /// 插件发来的能力请求（capability_request）。gen 用于审计关联；
@@ -349,11 +360,13 @@ impl PluginMgr {
     /// 收起时调用：进程组级 SIGKILL 杀灭非常驻会话；常驻会话保留
     /// （空闲自退交由 sweep_idle），仅清结果与上下文。
     pub fn kill_all(&mut self) {
+        let pinned: std::collections::HashSet<String> =
+            crate::ui::open_plugin_ids().into_iter().collect();
         let keep: Vec<usize> = self
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.resident)
+            .filter(|(_, s)| s.resident || pinned.contains(&s.id))
             .map(|(i, _)| i)
             .collect();
         for (i, s) in self.sessions.iter_mut().enumerate() {
@@ -434,12 +447,13 @@ impl PluginMgr {
         self.recent_failures(plugin)
     }
 
-    /// 主循环 tick 调用：处理结果/退出/能力请求事件。
-    /// 返回（是否有影响展示的变化, 待处理能力请求列表）。
-    /// 能力请求在 drain 返回后处理（执行/回复会重借 mgr，不能在借用中回调）。
-    pub fn drain(&mut self) -> (bool, Vec<CapRequest>) {
+    /// 主循环 tick 调用：处理结果/退出/能力请求/UI 请求事件。
+    /// 返回（是否有影响展示的变化, 待处理能力请求, 待渲染 UI 请求）。
+    /// 请求在 drain 返回后处理（执行/回复会重借 mgr，不能在借用中回调）。
+    pub fn drain(&mut self) -> (bool, Vec<CapRequest>, Vec<UiShowRequest>) {
         let mut dirty = false;
         let mut caps = Vec::new();
+        let mut uis = Vec::new();
         loop {
             match self.rx.try_recv() {
                 Ok(PluginEvent::Results { plugin, query_id, items }) => {
@@ -464,6 +478,9 @@ impl PluginMgr {
                     if caps.len() >= MAX_CAPS_PER_DRAIN {
                         break; // 洪水分摊到多 tick（审查 M-1）
                     }
+                }
+                Ok(PluginEvent::UiShow { plugin, gen, ui_id, spec }) => {
+                    uis.push(UiShowRequest { plugin, gen, ui_id, spec });
                 }
                 Ok(PluginEvent::Exited { plugin, gen }) => {
                     // 只有 (id, gen) 都匹配才认账：旧代（已收起会话）的迟到
@@ -495,7 +512,33 @@ impl PluginMgr {
                 Err(_) => break,
             }
         }
-        (dirty, caps)
+        (dirty, caps, uis)
+    }
+
+    /// 向指定会话回传 UI 事件（ui.event）
+    pub fn send_ui_event(&mut self, plugin: &str, gen: u64, ui_id: u64, event: &str, values: &str) {
+        let line = if event == "submit" {
+            format!(
+                "{{\"type\":\"ui.event\",\"ui_id\":{ui_id},\"event\":\"submit\",\"values\":{values}}}"
+            )
+        } else {
+            format!("{{\"type\":\"ui.event\",\"ui_id\":{ui_id},\"event\":\"{event}\"}}")
+        };
+        self.send_to_session(plugin, gen, &line);
+    }
+
+    /// 向指定会话发送一行协议消息（UI 事件回传等宿主主动消息）
+    pub fn send_to_session(&mut self, plugin: &str, gen: u64, line: &str) {
+        for s in &mut self.sessions {
+            if s.id != plugin || s.gen != gen {
+                continue;
+            }
+            s.last_used = Instant::now();
+            let _ = s.stdin.write_all(line.as_bytes());
+            let _ = s.stdin.write_all(b"\n");
+            let _ = s.stdin.flush();
+            return;
+        }
     }
 
     /// 当前查询下全部插件结果行（应用按 id 稳定排序）。
@@ -585,6 +628,10 @@ fn parse_line(plugin: &str, gen: u64, line: &str) -> Option<PluginEvent> {
         capability: String,
         #[serde(default)]
         params: serde_json::Value,
+        #[serde(default, rename = "ui_id")]
+        ui_id: u64,
+        #[serde(default)]
+        spec: serde_json::Value,
     }
     let msg = serde_json::from_str::<Msg>(line).ok()?;
     match msg.kind.as_str() {
@@ -621,6 +668,17 @@ fn parse_line(plugin: &str, gen: u64, line: &str) -> Option<PluginEvent> {
                 capability: msg.capability,
                 params: msg.params,
             }))
+        }
+        "ui.show" => {
+            if msg.ui_id == 0 {
+                return None;
+            }
+            Some(PluginEvent::UiShow {
+                plugin: plugin.to_string(),
+                gen,
+                ui_id: msg.ui_id,
+                spec: msg.spec,
+            })
         }
         _ => None,
     }
@@ -789,7 +847,7 @@ for line in sys.stdin:
     ) {
         let deadline = Instant::now() + timeout;
         loop {
-            let (_, mut more) = mgr.drain();
+            let (_, mut more, _) = mgr.drain();
             acc.append(&mut more);
             if cond(mgr, acc) {
                 return;

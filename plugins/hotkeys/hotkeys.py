@@ -1,24 +1,16 @@
 #!/usr/bin/env python3
-"""快捷键管理插件（M5 开放 API v2 旗舰示例：真插件形态）。
+"""快捷键管理插件（M5 UI 插件层旗舰示例：原生模板表单）。
 
-管理 GNOME「自定义快捷键」（设置 → 键盘 → 自定义快捷键，即
-gsettings org.gnome.settings-daemon.plugins.media-keys.custom-keybindings）。
-宿主无此内置功能——完全靠开放 API 实现：
+管理 GNOME「自定义快捷键」。UI 交互版（2026-10-10，按用户反馈推翻
+文本指令行）——插件发 ui.show 声明式表单，宿主渲染原生窗口：
 
-- 查：settings.read@… 读列表与各条目（name/command/binding）
-- 增/改/删：settings.write@… 编排写列表 + 条目键（reset 清旧条目），
-  「摘除 → 写回」触发 gsd-media-keys 重新抓键（yihu-panel 同款机制）
-- 反馈：notify
+- 「新增」→ 表单：名称文本框 + **点击按下组合键**的快捷键录入 +
+  **应用列表下拉**（点选"文件管理器"即可，不必知道 nautilus）
+- 「修改」→ 同表单预填当前值
+- 「删除」→ 确认行回车（列表内完成，无需额外 UI）
 
-交互（呼出面板内）：
-  hotkey / 快捷键 / kj         列出全部自定义快捷键 + 帮助
-  key add <键> | 命令 | 名称    新增（名称可省），如
-                              key add <Super>e | nautilus | 打开文件管理器
-  key del <关键词>             匹配（键/名称/命令），给出确认行，回车执行
-  key edit <关键词> | 新键 | 命令 | 名称   修改匹配的第一条
-
-插件沙箱内无 gsettings，所有读写经宿主能力代理；manifest 声明
-schema 白名单，安装页徽章明示，逐请求审计。
+用户全程不接触 <Super>e 语法和命令行。所有读写经宿主能力代理
+（settings.read/write schema 白名单），安装页徽章明示。
 """
 
 import ast
@@ -30,30 +22,13 @@ SUB = SCHEMA + ".custom-keybinding"
 LIST_KEY = "custom-keybindings"
 LIST_PREFIX = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
 
-HELP = [
-    "key add <键> | 命令 | 名称 —— 新增（例：key add <Super>e | nautilus | 打开文件管理器）",
-    "key del <关键词> —— 删除匹配的快捷键",
-    "key edit <关键词> | 新键 | 命令 | 名称 —— 修改匹配的第一条",
-]
-
 
 def send(o):
     sys.stdout.write(json.dumps(o, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
 
-def _results(qid, rows):
-    """rows: [(title, subtitle)]；payload=!none（不复制）。"""
-    items = [
-        {"title": t[:80], "subtitle": s[:110],
-         "icon": "input-keyboard-symbolic", "payload": "!none"}
-        for t, s in rows
-    ]
-    send({"type": "results", "query_id": qid, "items": items})
-
-
 def fmt_binding(b):
-    """<Super>e → Win+E（展示用）"""
     return (str(b).replace("<Super>", "Win+").replace("<Control>", "Ctrl+")
             .replace("<Primary>", "Ctrl+").replace("<Alt>", "Alt+")
             .replace("<Shift>", "Shift+"))
@@ -63,16 +38,10 @@ def ast_repr(items):
     return "[" + ", ".join("'" + str(i) + "'" for i in items) + "]"
 
 
-# ---- 能力请求编排 ----------------------------------------------------------
-# 两种活动（按 qid 隔离）：
-#   READ[qid]  = {"cb", "entries": {path: {k: v}}, "paths": []}
-#   QUEUE[qid] = {"ops": [(cap, params)], "tag"}；ok → 发下一个；全完 → notify
-# PENDING[request_id] = (qid, slot)；slot=None 表示写队列推进，其余为读取项。
-
-READ = {}
-QUEUE = {}
-PENDING = {}
-_seq = 1000
+READ = {}      # qid -> {"cb", "entries", "paths"}
+QUEUE = {}     # qid -> {"ops", "tag"}
+PENDING = {}   # request_id -> (qid, slot)
+_seq = 2000
 
 
 def _next_id():
@@ -121,7 +90,7 @@ def on_response(msg):
         return
     qid, slot = PENDING.pop(rid)
 
-    if slot is None:  # 写队列推进
+    if slot is None:
         q = QUEUE.get(qid)
         if not q:
             return
@@ -167,99 +136,143 @@ def on_response(msg):
         st["cb"](qid, st["paths"], st["entries"])
 
 
-# ---- 指令处理 ---------------------------------------------------------------
+# ---- UI 计划（activate 触发 ui.show） --------------------------------------
 
-EXEC = {"qid": 0, "ops": None, "tag": "", "args": None}
+UI_PLAN = None  # {"ui_id", "kind", "args"}
 
 
-def handle(qid, text):
-    parts = text.split()
-    if parts[0] == "key":
-        sub = text[4:].strip()
-        if sub.startswith("add "):
-            plan_add(qid, sub[4:])
-        elif sub.startswith("del "):
-            read_all(qid, lambda q, ps, es: plan_del(q, sub[4:].strip().lower(), ps, es))
-        elif sub.startswith("edit "):
-            seg = [x.strip() for x in sub[5:].split("|")]
-            if len(seg) < 3:
-                _results(qid, [("格式：key edit <关键词> | 新键 | 命令 | 名称",
-                                "例：key edit nautilus | <Super>f | nautilus | 文件")])
-                return
-            read_all(qid, lambda q, ps, es: plan_edit(
-                q, seg[0].lower(), seg[1], seg[2],
-                seg[3] if len(seg) > 3 else seg[2], ps, es))
-        else:
-            _results(qid, [(h, "") for h in HELP])
+def ui_form(qid, ui_id, kind, args):
+    """构建声明式表单 spec。"""
+    if kind == "add":
+        spec = {
+            "title": "新增快捷键",
+            "submit": "保存",
+            "fields": [
+                {"key": "name", "kind": "text", "label": "名称",
+                 "placeholder": "打开文件管理器"},
+                {"key": "binding", "kind": "hotkey", "label": "快捷键（点击后按下组合键）"},
+                {"key": "app", "kind": "app_select", "label": "动作：选择应用"},
+                {"key": "command", "kind": "text", "label": "或输入命令",
+                 "placeholder": "nautilus（高级）"},
+            ],
+        }
+    else:  # edit
+        path, e = args
+        spec = {
+            "title": "修改快捷键（" + fmt_binding(e.get("binding", "?")) + "）",
+            "submit": "保存",
+            "fields": [
+                {"key": "name", "kind": "text", "label": "名称",
+                 "value": e.get("name", "")},
+                {"key": "binding", "kind": "hotkey", "label": "快捷键（点击后按下新组合键）",
+                 "value": e.get("binding", "")},
+                {"key": "app", "kind": "app_select", "label": "动作：选择应用"},
+                {"key": "command", "kind": "text", "label": "或输入命令",
+                 "value": e.get("command", "")},
+            ],
+        }
+    send({"type": "ui.show", "ui_id": ui_id, "spec": spec})
+
+
+def on_ui_submit(ui_id, values):
+    """表单提交：校验 → 编排 gsettings 写队列。"""
+    if not UI_PLAN:
+        return
+    kind, args = UI_PLAN["kind"], UI_PLAN.get("args")
+    qid = UI_PLAN["qid"]
+
+    name = values.get("name", "").strip() or "自定义快捷键"
+    binding = values.get("binding", "").strip()
+    command = (values.get("command", "").strip()
+               or values.get("app", "").strip())
+
+    if not binding:
+        send({"type": "capability_request", "id": _next_id(),
+              "capability": "notify",
+              "params": {"summary": "一呼快捷键", "body": "请先按下快捷键组合"}})
+        return
+    if not command:
+        send({"type": "capability_request", "id": _next_id(),
+              "capability": "notify",
+              "params": {"summary": "一呼快捷键", "body": "请选择应用或输入命令"}})
+        return
+
+    if kind == "edit":
+        path, _e = args
+        ops = [
+            ("settings.write", {"schema": SCHEMA, "key": LIST_KEY,
+                                "value": ast_repr([x for x in _all_paths.get(qid, []) if x != path]),
+                                "op": "set"}),
+            ("settings.write", {"schema": SUB + ":" + path, "key": "name",
+                                "value": name, "op": "set"}),
+            ("settings.write", {"schema": SUB + ":" + path, "key": "command",
+                                "value": command, "op": "set"}),
+            ("settings.write", {"schema": SUB + ":" + path, "key": "binding",
+                                "value": binding, "op": "set"}),
+            ("settings.write", {"schema": SCHEMA, "key": LIST_KEY,
+                                "value": ast_repr(_all_paths.get(qid, [])), "op": "set"}),
+        ]
+        start_queue(qid, ops, "修改快捷键")
     else:
-        read_all(qid, show_list)
+        # 新增：需要先读列表分配 customN——激活时已读（UI_PLAN["paths"]）
+        paths = _all_paths.get(qid, [])
+        used = {p.rstrip("/").rsplit("custom", 1)[-1] for p in paths}
+        n = 0
+        while str(n) in used:
+            n += 1
+        new_path = LIST_PREFIX + "custom" + str(n) + "/"
+        ops = [
+            ("settings.write", {"schema": SCHEMA, "key": LIST_KEY,
+                                "value": ast_repr(paths), "op": "set"}),
+            ("settings.write", {"schema": SUB + ":" + new_path, "key": "name",
+                                "value": name, "op": "set"}),
+            ("settings.write", {"schema": SUB + ":" + new_path, "key": "command",
+                                "value": command, "op": "set"}),
+            ("settings.write", {"schema": SUB + ":" + new_path, "key": "binding",
+                                "value": binding, "op": "set"}),
+            ("settings.write", {"schema": SCHEMA, "key": LIST_KEY,
+                                "value": ast_repr(paths + [new_path]), "op": "set"}),
+        ]
+        start_queue(qid, ops, "新增快捷键")
+
+
+_all_paths = {}  # qid -> paths（edit/add 提交时用）
+
+
+def _results(qid, rows, payloads=None):
+    items = []
+    for i, (t, s_) in enumerate(rows):
+        p = "!none"
+        if payloads:
+            p = payloads[i] if i < len(payloads) else "!none"
+        items.append({"title": t[:90], "subtitle": s_[:110],
+                      "icon": "input-keyboard-symbolic", "payload": p})
+    send({"type": "results", "query_id": qid, "items": items})
 
 
 def show_list(qid, paths, entries):
-    if not paths:
-        _results(qid, [("（还没有自定义快捷键）",
-                        "新增：key add <Super>e | nautilus | 打开文件管理器")])
-        return
+    _all_paths[qid] = paths
     rows = []
+    payloads = []
     for p in paths:
         e = entries.get(p, {})
         rows.append((fmt_binding(e.get("binding", "?")) + " → " + e.get("name", ""),
-                     e.get("command", "") + "　（" + p.rstrip("/").rsplit("/", 1)[-1] + "）"))
-    rows.append(("新增：key add <键> | 命令 | 名称",
-                 "删除：key del <关键词>　修改：key edit <关键词> | 新键 | 命令 | 名称"))
-    _results(qid, rows)
+                     e.get("command", "")))
+        payloads.append("edit:" + p)
+    rows.append(("➕ 新增快捷键（回车打开表单）", "按下的组合键即绑定 · 动作从应用列表点选"))
+    payloads.append("new")
+    _results(qid, rows, payloads)
 
 
-def entry_of(paths, entries, kw):
+def plan_del(qid, kw, paths, entries):
+    hit = None
     for p in paths:
         e = entries.get(p, {})
         blob = (e.get("binding", "") + " " + e.get("name", "") + " "
                 + e.get("command", "")).lower()
         if kw in blob:
-            return p, e
-    return None
-
-
-def plan_add(qid, body):
-    seg = [x.strip() for x in body.split("|")]
-    if len(seg) < 2:
-        _results(qid, [("格式：key add <键> | 命令 | 名称",
-                        "例：key add <Super>e | nautilus | 打开文件管理器")])
-        return
-    binding, command = seg[0], seg[1]
-    name = seg[2] if len(seg) > 2 else command
-    EXEC["qid"] = qid
-    EXEC["args"] = (binding, command, name)
-    read_all(qid, _plan_add_go)
-
-
-def _plan_add_go(qid, paths, entries):
-    binding, command, name = EXEC["args"]
-    used = {p.rstrip("/").rsplit("custom", 1)[-1] for p in paths}
-    n = 0
-    while str(n) in used:
-        n += 1
-    new_path = LIST_PREFIX + "custom" + str(n) + "/"
-    # 摘除 → 写条目 → 写回：强制 gsd-media-keys 重新抓键
-    ops = [
-        ("settings.write", {"schema": SCHEMA, "key": LIST_KEY,
-                            "value": ast_repr(paths), "op": "set"}),
-        ("settings.write", {"schema": SUB + ":" + new_path, "key": "name",
-                            "value": name, "op": "set"}),
-        ("settings.write", {"schema": SUB + ":" + new_path, "key": "command",
-                            "value": command, "op": "set"}),
-        ("settings.write", {"schema": SUB + ":" + new_path, "key": "binding",
-                            "value": binding, "op": "set"}),
-        ("settings.write", {"schema": SCHEMA, "key": LIST_KEY,
-                            "value": ast_repr(paths + [new_path]), "op": "set"}),
-    ]
-    EXEC.update(qid=qid, ops=ops, tag="新增快捷键")
-    _results(qid, [("✅ 回车确认：新增 " + fmt_binding(binding) + " → " + name,
-                    "命令 " + command)])
-
-
-def plan_del(qid, kw, paths, entries):
-    hit = entry_of(paths, entries, kw)
+            hit = (p, e)
+            break
     if not hit:
         _results(qid, [("❌ 没有匹配「" + kw + "」的快捷键", "")])
         return
@@ -269,33 +282,33 @@ def plan_del(qid, kw, paths, entries):
                                "value": keep, "op": "set"})]
     for k in ("name", "command", "binding"):
         ops.append(("settings.write", {"schema": SUB + ":" + p, "key": k, "op": "reset"}))
-    EXEC.update(qid=qid, ops=ops, tag="删除快捷键")
-    _results(qid, [("✅ 回车确认：删除 " + fmt_binding(e.get("binding", "?")) + " → " + e.get("name", ""),
-                    e.get("command", ""))])
+    start_queue(qid, ops, "删除快捷键")
 
 
-def plan_edit(qid, kw, new_binding, new_command, new_name, paths, entries):
-    hit = entry_of(paths, entries, kw)
-    if not hit:
-        _results(qid, [("❌ 没有匹配「" + kw + "」的快捷键", "")])
-        return
-    p, e = hit
-    # 摘除 → 改条目 → 写回
-    ops = [
-        ("settings.write", {"schema": SCHEMA, "key": LIST_KEY,
-                            "value": ast_repr([x for x in paths if x != p]), "op": "set"}),
-        ("settings.write", {"schema": SUB + ":" + p, "key": "name",
-                            "value": new_name, "op": "set"}),
-        ("settings.write", {"schema": SUB + ":" + p, "key": "command",
-                            "value": new_command, "op": "set"}),
-        ("settings.write", {"schema": SUB + ":" + p, "key": "binding",
-                            "value": new_binding, "op": "set"}),
-        ("settings.write", {"schema": SCHEMA, "key": LIST_KEY,
-                            "value": ast_repr(paths), "op": "set"}),
-    ]
-    EXEC.update(qid=qid, ops=ops, tag="修改快捷键")
-    _results(qid, [("✅ 回车确认：改为 " + fmt_binding(new_binding) + " → " + new_name,
-                    "命令 " + new_command)])
+def handle_list_activate(qid, payload):
+    """列表行激活：edit:<path> → 预填表单；new → 先读列表再开新增表单
+    （新增提交要分配 customN，必须知道现有条目）。"""
+    global UI_PLAN
+    if payload == "new":
+        read_all(qid, _add_form)
+    elif payload.startswith("edit:"):
+        path = payload[5:]
+        read_all(qid, lambda q, ps, es: _edit_form(q, path, ps, es))
+
+
+def _add_form(qid, paths, entries):
+    global UI_PLAN
+    _all_paths[qid] = paths
+    UI_PLAN = {"qid": qid, "kind": "add", "ui_id": _next_id()}
+    ui_form(qid, UI_PLAN["ui_id"], "add", None)
+
+
+def _edit_form(qid, path, paths, entries):
+    global UI_PLAN
+    e = entries.get(path, {})
+    UI_PLAN = {"qid": qid, "kind": "edit", "args": (path, e), "ui_id": _next_id()}
+    _all_paths[qid] = paths
+    ui_form(qid, UI_PLAN["ui_id"], "edit", (path, e))
 
 
 def main():
@@ -312,21 +325,20 @@ def main():
             send({"type": "ready"})
         elif t == "capability_response":
             on_response(msg)
+        elif t == "ui.event":
+            if msg.get("event") == "submit":
+                on_ui_submit(msg.get("ui_id"), msg.get("values") or "{}")
         elif t == "query":
             qid = msg.get("id", 0)
-            text = msg.get("text", "").strip()
-            if text.startswith("key "):
-                handle(qid, text)
-            elif text and any(k in text.lower() for k in ("hotkey", "快捷键", "kj")):
-                handle(qid, text)
+            text = msg.get("text", "").strip().lower()
+            if text.startswith("key del "):
+                read_all(qid, lambda q, ps, es: plan_del(q, text[8:].strip(), ps, es))
+            elif text and any(k in text for k in ("hotkey", "快捷键", "kj")):
+                read_all(qid, show_list)
         elif t == "activate":
-            # 确认行回车：执行当前 EXEC 计划（每次 query 重算，防误触）
-            if EXEC.get("ops"):
-                qid = EXEC["qid"]
-                ops = EXEC["ops"]
-                tag = EXEC["tag"]
-                EXEC["ops"] = None
-                start_queue(qid, ops, tag)
+            payload = msg.get("payload") or ""
+            if payload.startswith("edit:") or payload == "new":
+                handle_list_activate(msg.get("id", 0), payload.lstrip("!"))
         elif t == "shutdown":
             sys.exit(0)
 

@@ -603,13 +603,17 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
         let grid_view = grid_view.clone();
         let scroll = scroll.clone();
         glib::timeout_add_local(Duration::from_millis(30), move || {
-            let (plugin_dirty, cap_reqs) = plugins.borrow_mut().drain();
+            let (plugin_dirty, cap_reqs, ui_reqs) = plugins.borrow_mut().drain();
             if plugin_dirty {
                 dirty.set(true);
             }
             // 能力请求在 drain 归还后处理：执行与回复都要重借 mgr
             for req in cap_reqs {
                 handle_capability(&deps_cap, req);
+            }
+            // UI 渲染请求（M5 UI 插件层）：主线程渲染原生表单，事件回传插件
+            for ui in ui_reqs {
+                handle_ui_show(&deps_cap, ui);
             }
             let changed = nuc.borrow_mut().tick(4).changed;
             if !(changed || dirty.get()) {
@@ -796,6 +800,33 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
         win,
         entry,
         tick: Some(tick),
+    }
+}
+
+/// UI 渲染请求处理：ui.show → 原生表单；submit/cancel → ui.event 回传。
+/// UI 打开期间会话被 pin（收起不杀，见 ui::open_plugin_ids）。
+fn handle_ui_show(deps: &Rc<Deps>, ui: crate::sessions::UiShowRequest) {
+    let plugin = ui.plugin.clone();
+    let gen = ui.gen;
+    let deps_cb = deps.clone();
+    let on_event: Rc<dyn Fn(u64, &str, String)> = Rc::new(move |ui_id, event, values| {
+        deps_cb.audit.record("ui", 0, "ui.event", event, &values);
+        deps_cb
+            .plugins
+            .borrow_mut()
+            .send_ui_event(&plugin, gen, ui_id, event, &values);
+    });
+    if let Err(e) = crate::ui::show(ui.ui_id, &ui.plugin, &ui.spec, on_event) {
+        deps.audit
+            .record(&ui.plugin, ui.gen, "ui.show", "deny", &e);
+        deps.plugins.borrow_mut().respond_gen(
+            &ui.plugin,
+            ui.gen,
+            ui.ui_id,
+            false,
+            &format!("ui.show 失败：{e}"),
+            None,
+        );
     }
 }
 
