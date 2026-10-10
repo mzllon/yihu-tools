@@ -4,13 +4,13 @@
 //! 安装时明示（含参数），面板能力代理按 manifest 逐请求强制。
 //!
 //! v2 语法（Chrome/Firefox 声明制 + Raycast API 抽象的路线，2026-10-10 拍板）：
-//! - 无参能力：`clipboard.write`、`open_uri`、`launch_app`、`notify`、
-//!   `selected_files.read`、`screenshot.take`——带 `@` 参数即非法；
+//! - 无参能力：`clipboard.write`、`clipboard.read`、`open_uri`、`launch_app`、
+//!   `notify`、`selected_files.read`、`screenshot.take`——带 `@` 参数即非法；
 //! - `network.fetch@<host>`：允许经宿主向该 host 发请求（可多条，host 精确
 //!   匹配，可带端口）；
 //! - `settings.write@<schema>`：允许写该 gsettings schema 下的键（多条）；
-//! - `fs.write@<glob>`：允许写匹配的路径（`~` 展开 HOME；`*` 通配、`**` 跨层），
-//!   多条。
+//! - `fs.write@<glob>` / `fs.read@<glob>`：允许写/读匹配的路径（`~` 展开
+//!   HOME；`*` 通配、`**` 跨层），多条。
 //!
 //! 未知名/非法参数 = manifest 解析失败（拒装）。管道即凭证：请求只能来自
 //! 宿主拉起的会话 stdio。沙箱白名单本身不变（插件进程依然无网无 FS）——
@@ -18,6 +18,8 @@
 
 /// 经宿主写剪贴板（Wayland 下插件进程自写不可靠，宿主托管）
 pub const CLIPBOARD_WRITE: &str = "clipboard.write";
+/// 经宿主读剪贴板文本（gdk 异步读，隐私敏感：安装页明示；M5 v2 扩容）
+pub const CLIPBOARD_READ: &str = "clipboard.read";
 /// 经宿主打开链接（scheme 白名单：http/https/mailto）
 pub const OPEN_URI: &str = "open_uri";
 /// 经宿主启动已安装应用（仅限宿主应用列表中的 desktop id）
@@ -36,10 +38,14 @@ pub const SETTINGS_WRITE: &str = "settings.write";
 pub const SETTINGS_READ: &str = "settings.read";
 /// 经宿主写文件（声明路径 glob，UTF-8 文本，原子写）
 pub const FS_WRITE: &str = "fs.write";
+/// 经宿主读文件（声明路径 glob，UTF-8 文本；canonicalize 复检防符号链接
+/// 逃逸——M5 v2 扩容）
+pub const FS_READ: &str = "fs.read";
 
 /// v2 全部合法能力名（无参能力 + 带参能力的基名）
 pub const KNOWN: &[&str] = &[
     CLIPBOARD_WRITE,
+    CLIPBOARD_READ,
     OPEN_URI,
     LAUNCH_APP,
     NOTIFY,
@@ -49,10 +55,11 @@ pub const KNOWN: &[&str] = &[
     SETTINGS_WRITE,
     SETTINGS_READ,
     FS_WRITE,
+    FS_READ,
 ];
 
 /// 允许带 @参数的能力基名
-pub const PARAMETRIC: &[&str] = &[NETWORK_FETCH, SETTINGS_WRITE, SETTINGS_READ, FS_WRITE];
+pub const PARAMETRIC: &[&str] = &[NETWORK_FETCH, SETTINGS_WRITE, SETTINGS_READ, FS_WRITE, FS_READ];
 
 /// 一条声明：基名 + 参数（无参能力 param 为 None）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +137,7 @@ fn validate_param(cap: &str, p: &str) -> Result<(), String> {
             }
             Ok(())
         }
-        FS_WRITE => {
+        FS_WRITE | FS_READ => {
             // ~ 开头（将展开为 HOME）或绝对路径；其余交给 glob 匹配
             if p.starts_with('~') || p.starts_with('/') {
                 Ok(())
@@ -183,6 +190,7 @@ pub fn label(declared: &str) -> String {
     match parse_declaration(declared) {
         Ok(d) => match (d.capability.as_str(), d.param.as_deref()) {
             (CLIPBOARD_WRITE, _) => "写剪贴板（经宿主）".into(),
+            (CLIPBOARD_READ, _) => "读剪贴板（经宿主）".into(),
             (OPEN_URI, _) => "打开链接（http/https/mailto）".into(),
             (LAUNCH_APP, _) => "启动应用（已安装列表内）".into(),
             (NOTIFY, _) => "桌面通知".into(),
@@ -192,6 +200,7 @@ pub fn label(declared: &str) -> String {
             (SETTINGS_WRITE, Some(schema)) => format!("改系统设置 {schema}"),
             (SETTINGS_READ, Some(schema)) => format!("读系统设置 {schema}"),
             (FS_WRITE, Some(path)) => format!("写文件 {path}"),
+            (FS_READ, Some(path)) => format!("读文件 {path}"),
             _ => d.capability,
         },
         Err(_) => declared.to_string(),
@@ -220,6 +229,7 @@ mod tests {
             "settings.write@org.gnome.desktop.interface",
             "fs.write@~/.config/Code*/settings.json",
             "fs.write@/opt/share/**/*.conf",
+            "fs.read@~/.config/**/*.json",
         ]))
         .unwrap();
     }
@@ -233,9 +243,11 @@ mod tests {
             "Clipboard.write",
             // 无参能力带参数
             "clipboard.write@x",
+            "clipboard.read@x",
             // 带参能力缺参数
             "network.fetch",
             "fs.write",
+            "fs.read",
             "settings.write",
             // 参数形状非法
             "network.fetch@..",
@@ -244,10 +256,13 @@ mod tests {
             "settings.write@org.gnome..x",
             "settings.write@schema space",
             "fs.write@relative/path",
+            "fs.read@relative/path",
             "fs.write@",
         ] {
             assert!(validate(&s(&[bad])).is_err(), "{bad:?} 应被拒");
         }
+        // 读剪贴板是隐私敏感能力，但按声明制（无参）合法
+        validate(&s(&[CLIPBOARD_READ])).unwrap();
     }
 
     #[test]
@@ -274,10 +289,15 @@ mod tests {
             "写文件 ~/.config/Code*/settings.json"
         );
         assert_eq!(
+            label("fs.read@~/.config/**/*.json"),
+            "读文件 ~/.config/**/*.json"
+        );
+        assert_eq!(
             label("settings.write@org.gnome.desktop.interface"),
             "改系统设置 org.gnome.desktop.interface"
         );
         assert_eq!(label("clipboard.write"), "写剪贴板（经宿主）");
+        assert_eq!(label("clipboard.read"), "读剪贴板（经宿主）");
         assert_eq!(label("garbage"), "garbage");
     }
 }

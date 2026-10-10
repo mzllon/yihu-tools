@@ -64,11 +64,13 @@ struct Deps {
     cap_async: Arc<Mutex<Vec<CapOutcome>>>,
 }
 
-/// 后台执行的能力结果（截屏）：由常驻泵回主循环回包/审计/副作用
+/// 后台执行的能力结果（截屏/网络/settings/fs 等）：由常驻泵回主循环回包/审计/副作用
 struct CapOutcome {
     plugin: String,
     gen: u64,
     request_id: u64,
+    /// 发起能力名：泵据此写审计（此前硬编码 screenshot.take，扩容后失真）
+    capability: String,
     ok: bool,
     error: String,
     /// 截图文件路径（成功时；用于系统通知）
@@ -228,8 +230,10 @@ pub fn run_daemon() {
                             "",
                             out.data.as_deref(),
                         );
+                        // 授权时点的 grant 已在 handle_capability 记过；
+                        // 这里补记执行结果（done/error），能力名取真实值
                         deps.audit
-                            .record(&out.plugin, out.gen, "screenshot.take", "grant", "");
+                            .record(&out.plugin, out.gen, &out.capability, "done", "");
                         if out.clipboard {
                             if let Some(bytes) = &out.png {
                                 if let Some(display) = gdk::Display::default() {
@@ -266,7 +270,7 @@ pub fn run_daemon() {
                         deps.audit.record(
                             &out.plugin,
                             out.gen,
-                            if out.plugin == "hotkey" { "screenshot.take" } else { &out.plugin },
+                            &out.capability,
                             "error",
                             &out.error,
                         );
@@ -314,6 +318,7 @@ pub fn run_daemon() {
                                     plugin: "hotkey".into(),
                                     gen: 0,
                                     request_id: 0,
+                                    capability: "screenshot.take".into(),
                                     ok,
                                     error,
                                     path,
@@ -892,6 +897,68 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
             spawn_fswrite_job(deps, &req, &path, &text);
             return;
         }
+        Ok(crate::caps::CapAction::FsRead { path }) => {
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", &path);
+            spawn_fsread_job(deps, &req, &path);
+            return;
+        }
+        // 读剪贴板：gdk 异步读（Wayland 下是到数据源的 IPC 往返，同步版
+        // 会阻塞主循环——硬性规则 #1）。完成回调推 cap_async 槽走统一泵。
+        Ok(crate::caps::CapAction::ClipboardRead) => {
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", "");
+            let Some(display) = gdk::Display::default() else {
+                deps.plugins.borrow_mut().respond_gen(
+                    &req.plugin,
+                    req.gen,
+                    req.request_id,
+                    false,
+                    "无默认显示",
+                    None,
+                );
+                deps.audit
+                    .record(&req.plugin, req.gen, &req.capability, "error", "无默认显示");
+                return;
+            };
+            let slot = deps.cap_async.clone();
+            let plugin = req.plugin.clone();
+            let gen = req.gen;
+            let request_id = req.request_id;
+            display.clipboard().read_text_async(gio::Cancellable::NONE, move |res| {
+                let (ok, error, data) = match res {
+                    Ok(Some(text)) if text.len() > crate::caps::MAX_CLIPBOARD_BYTES => (
+                        false,
+                        format!("剪贴板内容超限（>{} 字节）", crate::caps::MAX_CLIPBOARD_BYTES),
+                        None,
+                    ),
+                    Ok(Some(text)) => (
+                        true,
+                        String::new(),
+                        Some(
+                            serde_json::to_string(text.as_str())
+                                .unwrap_or_else(|_| "null".into()),
+                        ),
+                    ),
+                    Ok(None) => (false, "剪贴板当前没有文本内容".into(), None),
+                    Err(e) => (false, format!("读取剪贴板失败：{e}"), None),
+                };
+                slot.lock().unwrap().push(CapOutcome {
+                    plugin,
+                    gen,
+                    request_id,
+                    capability: "clipboard.read".into(),
+                    ok,
+                    error,
+                    path: String::new(),
+                    png: None,
+                    clipboard: false,
+                    data,
+                    notify: false,
+                });
+            });
+            return;
+        }
         Ok(action) => execute_capability(action),
         Err(e) => Err(e),
     };
@@ -951,6 +1018,7 @@ fn spawn_network_job(deps: &Deps, req: &crate::sessions::CapRequest, url: &str) 
             plugin,
             gen,
             request_id,
+            capability: "network.fetch".into(),
             ok,
             error,
             path: String::new(),
@@ -1008,6 +1076,7 @@ fn spawn_settings_job(
             plugin,
             gen,
             request_id,
+            capability: "settings.write".into(),
             ok,
             error,
             path: String::new(),
@@ -1047,6 +1116,7 @@ fn spawn_settings_read_job(
                     plugin,
                     gen,
                     request_id,
+                    capability: "settings.read".into(),
                     ok: false,
                     error: format!(
                         "gsettings get 失败：{}",
@@ -1065,6 +1135,7 @@ fn spawn_settings_read_job(
                     plugin,
                     gen,
                     request_id,
+                    capability: "settings.read".into(),
                     ok: false,
                     error: format!("gsettings 启动失败：{e}"),
                     path: String::new(),
@@ -1080,6 +1151,7 @@ fn spawn_settings_read_job(
             plugin,
             gen,
             request_id,
+            capability: "settings.read".into(),
             ok: true,
             error: String::new(),
             path: String::new(),
@@ -1131,12 +1203,58 @@ fn spawn_fswrite_job(deps: &Deps, req: &crate::sessions::CapRequest, path: &str,
             plugin,
             gen,
             request_id,
+            capability: "fs.write".into(),
             ok,
             error,
             path: String::new(),
             png: None,
             clipboard: false,
             data: None,
+            notify: false,
+        });
+    });
+}
+
+/// fs.read：读取 UTF-8 文本回传（canonicalize 与 glob 复检已在 caps::evaluate）。
+/// 文件 IO 在后台线程（硬性规则 #1），体积上限内一次性读入。
+fn spawn_fsread_job(deps: &Deps, req: &crate::sessions::CapRequest, path: &str) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    let path = path.to_string();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<String, String> {
+            let meta =
+                std::fs::metadata(&path).map_err(|e| format!("读取失败：{e}"))?;
+            if meta.len() > crate::caps::MAX_FSREAD_BYTES as u64 {
+                return Err(format!(
+                    "文件超限（>{} 字节）",
+                    crate::caps::MAX_FSREAD_BYTES
+                ));
+            }
+            let bytes = std::fs::read(&path).map_err(|e| format!("读取失败：{e}"))?;
+            String::from_utf8(bytes).map_err(|_| "文件不是 UTF-8 文本".to_string())
+        })();
+        let (ok, error, data) = match result {
+            Ok(t) => (
+                true,
+                String::new(),
+                Some(serde_json::to_string(&t).unwrap_or_else(|_| "null".into())),
+            ),
+            Err(e) => (false, e, None),
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            capability: "fs.read".into(),
+            ok,
+            error,
+            path: String::new(),
+            png: None,
+            clipboard: false,
+            data,
             notify: false,
         });
     });
@@ -1166,6 +1284,7 @@ fn spawn_screenshot_job(deps: &Deps, req: &crate::sessions::CapRequest, mode: &s
             plugin,
             gen,
             request_id,
+            capability: "screenshot.take".into(),
             ok,
             error,
             path,
@@ -1204,11 +1323,13 @@ fn execute_capability(action: crate::caps::CapAction) -> Result<(), String> {
             }
         }
         // 以下均走异步作业（handle_capability 拦截），同步路径不可达
+        crate::caps::CapAction::ClipboardRead => Ok(()),
         crate::caps::CapAction::Screenshot { .. } => Ok(()),
         crate::caps::CapAction::NetworkFetch { .. } => Ok(()),
         crate::caps::CapAction::SettingsWrite { .. } => Ok(()),
         crate::caps::CapAction::SettingsRead { .. } => Ok(()),
         crate::caps::CapAction::FsWrite { .. } => Ok(()),
+        crate::caps::CapAction::FsRead { .. } => Ok(()),
     }
 }
 

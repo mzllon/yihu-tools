@@ -776,6 +776,19 @@ for line in sys.stdin:
                   "capability": "fs.write",
                   "params": {"path": "~/.yihu-e2e-test/sub/data.json", "text": "{\"ok\": true}"}})
             continue
+        if text == "fsread":
+            rid = 6000 + m["id"]
+            pending[rid] = m["id"]
+            send({"type": "capability_request", "id": rid,
+                  "capability": "fs.read",
+                  "params": {"path": "~/.yihu-e2e-test/sub/data.json"}})
+            continue
+        if text == "clipread":
+            rid = 7000 + m["id"]
+            pending[rid] = m["id"]
+            send({"type": "capability_request", "id": rid,
+                  "capability": "clipboard.read", "params": {}})
+            continue
         rid = 1000 + m["id"]
         if text == "shot":
             cap = "screenshot.take"
@@ -816,7 +829,7 @@ for line in sys.stdin:
             (
                 "fake-plugin",
                 "假插件",
-                "[\"clipboard.write\", \"selected_files.read\", \"settings.write@org.gnome.desktop.interface\", \"fs.write@~/.yihu-e2e-test/**/*.json\", \"settings.read@org.gnome.settings-daemon.plugins.media-keys\"]",
+                "[\"clipboard.write\", \"clipboard.read\", \"selected_files.read\", \"settings.write@org.gnome.desktop.interface\", \"fs.write@~/.yihu-e2e-test/**/*.json\", \"fs.read@~/.yihu-e2e-test/**/*.json\", \"settings.read@org.gnome.settings-daemon.plugins.media-keys\"]",
                 false,
             ),
             ("plain-plugin", "素插件", "[]", true),
@@ -1027,6 +1040,40 @@ for line in sys.stdin:
         reply_data(&mut mgr, &mut replied, &rd, true, "", Some(&val));
         wait_rows(&mut mgr, Duration::from_secs(10), |m| {
             m.latest_rows().iter().any(|r| r.title.starts_with("granted:"))
+        });
+
+        // ③e fs.read：声明 glob 内路径 → data 回传文件文本
+        mgr.broadcast("fsread");
+        wait_for(&mut mgr, &mut acc, Duration::from_secs(10), |_, c| {
+            find_unreplied(c, &replied, |r| r.capability == "fs.read").is_some()
+        });
+        let fr = find_unreplied(&acc, &replied, |r| r.capability == "fs.read")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            fr.params["path"], "~/.yihu-e2e-test/sub/data.json",
+            "fs.read 请求参数应原样到达"
+        );
+        reply_data(&mut mgr, &mut replied, &fr, true, "", Some("\"{\\\"ok\\\": true}\""));
+        wait_rows(&mut mgr, Duration::from_secs(10), |m| {
+            m.latest_rows()
+                .iter()
+                .any(|r| r.title.contains("{\"ok\": true}"))
+        });
+
+        // ③f clipboard.read：声明即授权，data 回传剪贴板文本
+        mgr.broadcast("clipread");
+        wait_for(&mut mgr, &mut acc, Duration::from_secs(10), |_, c| {
+            find_unreplied(c, &replied, |r| r.capability == "clipboard.read").is_some()
+        });
+        let cr = find_unreplied(&acc, &replied, |r| r.capability == "clipboard.read")
+            .unwrap()
+            .clone();
+        reply_data(&mut mgr, &mut replied, &cr, true, "", Some("\"剪贴板文本\""));
+        wait_rows(&mut mgr, Duration::from_secs(10), |m| {
+            m.latest_rows()
+                .iter()
+                .any(|r| r.title.contains("剪贴板文本"))
         });
 
         // ④ 未声明 screenshot.take → 拒绝路径（不触发真实截屏）

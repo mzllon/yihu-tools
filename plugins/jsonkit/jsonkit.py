@@ -1,0 +1,113 @@
+#!/usr/bin/python3
+"""JSON 工具：复制一段 JSON → 面板输入 json → 格式化/压缩/校验，回车复制结果。
+
+演示 M5 开放 API v2 的 clipboard.read 能力代理回环：插件在沙箱里读不到
+剪贴板，向宿主发 capability_request，宿主校验 manifest 声明后以
+capability_response.data 回传文本。激活复制由宿主激活语义自动完成
+（payload 不带 `!` 前缀 = 回车自动复制），插件自身无需 clipboard.write。
+
+查询只在输入恰为 json / json 格式化 时触发，避免每次击键都发读请求。
+"""
+
+import json
+import sys
+
+# 触发词（小写化后精确匹配）
+TRIGGERS = {"json", "json格式化", "json 格式化"}
+
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def rows_for(text):
+    """解析剪贴板文本，产出结果行。payload = 要复制回剪贴板的内容。"""
+    try:
+        obj = json.loads(text)
+    except Exception as e:
+        # 校验失败也要给出可用信息：定位片段 + 原文回显
+        msg = str(e).split("\n")[0]
+        return [
+            {"title": f"✗ 不是合法 JSON：{msg}", "subtitle": "修正后重试", "payload": "!"},
+        ]
+    pretty = json.dumps(obj, ensure_ascii=False, indent=2)
+    compact = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    kind = type(obj).__name__
+    rows = [
+        {
+            "title": "✓ 合法 JSON · 格式化",
+            "subtitle": f"{kind} · {len(pretty)} 字符，回车复制",
+            "payload": pretty,
+        },
+        {
+            "title": "压缩",
+            "subtitle": f"{len(compact)} 字符，回车复制",
+            "payload": compact,
+        },
+    ]
+    return rows
+
+
+def main():
+    pending = {}  # request_id -> query_id
+    for line in sys.stdin:
+        try:
+            msg = json.loads(line)
+        except Exception:
+            continue
+        t = msg.get("type")
+
+        if t == "init":
+            send({"type": "ready"})
+
+        elif t == "shutdown":
+            return
+
+        elif t == "query":
+            text = (msg.get("text") or "").strip()
+            if text.lower() not in TRIGGERS:
+                continue
+            # 触发：请宿主代读剪贴板（manifest 已声明 clipboard.read）
+            rid = 1000 + msg["id"]
+            pending[rid] = msg["id"]
+            send({
+                "type": "capability_request",
+                "id": rid,
+                "capability": "clipboard.read",
+                "params": {},
+            })
+
+        elif t == "capability_response":
+            rid = msg.get("id")
+            qid = pending.pop(rid, None)
+            if qid is None:
+                continue
+            if not msg.get("ok"):
+                send({
+                    "type": "results",
+                    "query_id": qid,
+                    "items": [{
+                        "title": f"读取剪贴板失败：{msg.get('error', '?')}",
+                        "subtitle": "检查 manifest 是否声明 clipboard.read",
+                        "payload": "!",
+                    }],
+                })
+                continue
+            # data = 宿主 JSON 编码的剪贴板文本
+            clip = msg.get("data")
+            if not isinstance(clip, str) or not clip.strip():
+                send({
+                    "type": "results",
+                    "query_id": qid,
+                    "items": [{
+                        "title": "剪贴板是空的或没有文本",
+                        "payload": "!",
+                    }],
+                })
+                continue
+            send({"type": "results", "query_id": qid, "items": rows_for(clip)})
+
+
+if __name__ == "__main__":
+    main()

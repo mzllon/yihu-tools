@@ -3,6 +3,11 @@
 //! 对标 uTools/ZTools 的插件中心形态：图标卡片网格（40px 图标 + 名称 +
 //! 版本 + 权限徽章 + 启停/安装），不再是密集文字行。目录/zip 安装收敛
 //! 为「高级安装」一卡。启停/移除/安装/市场逻辑与信号保持不变。
+//!
+//! M5 插件数据管理（2026-10-11，对标 Rubick「多端数据同步」页）：每张
+//! 已装卡片带数据行——文件数/体积统计 + 打开目录 / 导出 zip / 导入 zip /
+//! 清空。统计与导入导出走后台线程 + 轮询回填（本页既有惯例）；
+//! 导入校验与插件包安装同强度（yihu-core::datactl）。
 
 use adw::prelude::*;
 use gtk::glib;
@@ -10,6 +15,7 @@ use gtk::{
     Align, Box as GtkBox, Button, Entry, FlowBox, Image, Label, Orientation, Switch,
 };
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,6 +32,11 @@ struct Ui {
     market_hint: Label,
     state_hint: Label,
     market_plugins: Rc<std::cell::RefCell<Vec<MarketPlugin>>>,
+    /// 已装卡片的数据统计行（id → label），后台统计/操作结果回填用
+    data_labels: std::cell::RefCell<HashMap<String, Label>>,
+    /// 数据统计后台作业回填槽（id → (文件数, 字节数)；None = 目录不存在）
+    stats_slot: Arc<Mutex<Option<HashMap<String, Option<(u64, u64)>>>>>,
+    stats_pending: Cell<bool>,
 }
 
 /// 后台任务结果槽（阻塞调用不入 UI 主线程的既有惯例）
@@ -116,6 +127,9 @@ pub fn build_page() -> gtk::Widget {
         market_hint,
         state_hint,
         market_plugins: Rc::new(std::cell::RefCell::new(Vec::new())),
+        data_labels: std::cell::RefCell::new(HashMap::new()),
+        stats_slot: Arc::new(Mutex::new(None)),
+        stats_pending: Cell::new(false),
     });
 
     // —— 信号：目录/zip 安装（后台线程 + 轮询回填）——
@@ -262,6 +276,7 @@ impl Ui {
         while let Some(child) = self.installed_flow.first_child() {
             self.installed_flow.remove(&child);
         }
+        self.data_labels.borrow_mut().clear();
 
         let (installed, errors) = plugins::list_installed();
         let state = plugins::PluginsState::load();
@@ -327,6 +342,9 @@ impl Ui {
             // 权限徽章行
             card.append(&perm_badges(&inst.manifest.permissions));
 
+            // 数据行（M5）：统计 + 打开/导出/导入/清空
+            card.append(&self.data_row(&id));
+
             // 尾行：入口信息 + 移除
             let foot = GtkBox::new(Orientation::Horizontal, 6);
             let entry_lbl = Label::new(Some(&inst.manifest.entry));
@@ -354,6 +372,116 @@ impl Ui {
             card.append(&foot);
 
             self.installed_flow.insert(&card, -1);
+        }
+        self.spawn_all_stats();
+    }
+
+    // ---- 插件数据管理（M5，对标 Rubick 数据同步页）----
+
+    /// 构建单张卡片的数据行：统计文本 + 四个图标按钮（打开/导出/导入/清空）
+    fn data_row(self: &Rc<Self>, id: &str) -> GtkBox {
+        let row = GtkBox::new(Orientation::Horizontal, 4);
+        let stat = Label::new(Some("统计中…"));
+        stat.add_css_class("caption-sm");
+        stat.add_css_class("dim-label");
+        stat.set_halign(Align::Start);
+        stat.set_hexpand(true);
+        stat.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        row.append(&stat);
+        self.data_labels.borrow_mut().insert(id.to_string(), stat);
+
+        row.append(&self.data_btn(
+            id,
+            "folder-open-symbolic",
+            "打开数据目录",
+            false,
+            open_data_dir,
+        ));
+        row.append(&self.data_btn(
+            id,
+            "document-save-symbolic",
+            "导出数据为 zip",
+            false,
+            export_data_dialog,
+        ));
+        row.append(&self.data_btn(
+            id,
+            "document-revert-symbolic",
+            "从 zip 导入（整体替换现有数据）",
+            false,
+            import_data_dialog,
+        ));
+        row.append(&self.data_btn(id, "user-trash-symbolic", "清空数据", true, clear_data_confirmed));
+        row
+    }
+
+    fn data_btn(
+        self: &Rc<Self>,
+        id: &str,
+        icon: &str,
+        tip: &str,
+        destructive: bool,
+        action: fn(Rc<Ui>, Option<gtk::Window>, String),
+    ) -> Button {
+        let btn = Button::new();
+        let img = Image::from_icon_name(icon);
+        btn.set_child(Some(&img));
+        btn.add_css_class("flat");
+        btn.add_css_class("caption-sm");
+        if destructive {
+            btn.add_css_class("destructive-action");
+        }
+        btn.set_tooltip_text(Some(tip));
+        let ui = self.clone();
+        let id = id.to_string();
+        btn.connect_clicked(move |b| {
+            if ui.busy.get() {
+                return;
+            }
+            // FileDialog / AlertDialog 的父窗口；拿不到则以无父窗口弹出。
+            // 窗口是引用计数对象，Clone 后可安全进异步回调。
+            let win = b.root().and_then(|r| r.dynamic_cast::<gtk::Window>().ok());
+            action(ui.clone(), win, id.clone());
+        });
+        btn
+    }
+
+    /// 后台统计全部已装插件的数据量，完成后逐卡回填
+    fn spawn_all_stats(self: &Rc<Self>) {
+        if self.stats_pending.get() {
+            return;
+        }
+        self.stats_pending.set(true);
+        let slot = self.stats_slot.clone();
+        std::thread::spawn(move || {
+            let (installed, _) = plugins::list_installed();
+            let mut map = HashMap::new();
+            for inst in &installed {
+                let id = inst.manifest.id.clone();
+                let s = yihu_core::datactl::data_stats(&plugins::plugin_data_dir(&id));
+                map.insert(id, s);
+            }
+            *slot.lock().unwrap() = Some(map);
+        });
+        let ui = self.clone();
+        glib::timeout_add_local(Duration::from_millis(150), move || {
+            let Some(map) = ui.stats_slot.lock().unwrap().take() else {
+                return glib::ControlFlow::Continue;
+            };
+            ui.stats_pending.set(false);
+            for (id, s) in &map {
+                if let Some(lbl) = ui.data_labels.borrow().get(id) {
+                    lbl.set_text(&fmt_data_stats(*s));
+                }
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    /// 数据行内联反馈（导出中…/已导出 等），不打断卡片布局
+    fn set_stat(self: &Rc<Self>, id: &str, text: &str) {
+        if let Some(lbl) = self.data_labels.borrow().get(id) {
+            lbl.set_text(text);
         }
     }
 
@@ -511,4 +639,220 @@ fn install_market_plugin(ui: &Rc<Ui>, p: MarketPlugin) {
         }
         glib::ControlFlow::Continue
     });
+}
+
+// ---- 插件数据管理动作（M5）----
+
+/// 打开数据目录（文件管理器）。目录不存在则先建（0700）。
+fn open_data_dir(_ui: Rc<Ui>, _win: Option<gtk::Window>, id: String) {
+    let Ok(dir) = plugins::ensure_plugin_data_dir(&id) else {
+        return;
+    };
+    let _ = std::process::Command::new("xdg-open")
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// 导出数据：FileDialog::save 选位置 → 后台打 zip → 行内回填。
+fn export_data_dialog(ui: Rc<Ui>, win: Option<gtk::Window>, id: String) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let dlg = gtk::FileDialog::new();
+    dlg.set_initial_name(Some(&format!("yihu-{id}-data-{ts}.zip")));
+    dlg.save(win.as_ref(), gtk::gio::Cancellable::NONE, move |res| match res {
+        Ok(file) => {
+            let Some(path) = file.path() else { return };
+            if ui.busy.get() {
+                return;
+            }
+            ui.busy.set(true);
+            ui.set_stat(&id, "导出中…");
+            let data_dir = plugins::plugin_data_dir(&id);
+            let slot: Arc<Mutex<Option<Result<String, String>>>> = Arc::new(Mutex::new(None));
+            let slot2 = slot.clone();
+            let id2 = id.clone();
+            std::thread::spawn(move || {
+                let r = yihu_core::datactl::export_data_zip(&data_dir, &id2, &path)
+                    .map(|n| format!("已导出 {n} 个文件 → {}", path.display()));
+                *slot2.lock().unwrap() = Some(r);
+            });
+            let ui = ui.clone();
+            let id = id.clone();
+            glib::timeout_add_local(Duration::from_millis(150), move || {
+                let Some(r) = slot.lock().unwrap().take() else {
+                    return glib::ControlFlow::Continue;
+                };
+                ui.busy.set(false);
+                match r {
+                    Ok(msg) => ui.set_stat(&id, &msg),
+                    Err(e) => ui.set_stat(&id, &format!("导出失败：{e}")),
+                }
+                glib::ControlFlow::Break
+            });
+        }
+        // 用户取消（Esc / 关闭）静默返回
+        Err(e) if dialog_dismissed(&e) => {}
+        Err(e) => ui.set_stat(&id, &format!("选择保存位置失败：{e}")),
+    });
+}
+
+/// 导入数据：确认覆盖 → FileDialog::open 选 zip → 后台整目录替换。
+fn import_data_dialog(ui: Rc<Ui>, win: Option<gtk::Window>, id: String) {
+    confirm_action(
+        win,
+        "导入数据？",
+        &format!("将从 zip 导入「{id}」的数据，现有数据会被整体替换。"),
+        "选择文件并导入",
+        false,
+        ui.clone(),
+        id,
+        import_data_pick,
+    );
+}
+
+fn import_data_pick(ui: Rc<Ui>, win: Option<gtk::Window>, id: String) {
+    let dlg = gtk::FileDialog::new();
+    dlg.open(win.as_ref(), gtk::gio::Cancellable::NONE, move |res| match res {
+        Ok(file) => {
+            let Some(path) = file.path() else { return };
+            if ui.busy.get() {
+                return;
+            }
+            ui.busy.set(true);
+            ui.set_stat(&id, "导入中…");
+            let data_dir = plugins::plugin_data_dir(&id);
+            let slot: Arc<Mutex<Option<Result<u64, String>>>> = Arc::new(Mutex::new(None));
+            let slot2 = slot.clone();
+            let id2 = id.clone();
+            std::thread::spawn(move || {
+                let r = yihu_core::datactl::import_data_zip(&path, &id2, &data_dir);
+                *slot2.lock().unwrap() = Some(r);
+            });
+            let ui = ui.clone();
+            let id = id.clone();
+            glib::timeout_add_local(Duration::from_millis(150), move || {
+                let Some(r) = slot.lock().unwrap().take() else {
+                    return glib::ControlFlow::Continue;
+                };
+                ui.busy.set(false);
+                match r {
+                    Ok(n) => ui.set_stat(&id, &format!("已导入 {n} 个文件")),
+                    Err(e) => ui.set_stat(&id, &format!("导入失败：{e}")),
+                }
+                glib::ControlFlow::Break
+            });
+        }
+        // 用户取消（Esc / 关闭）静默返回
+        Err(e) if dialog_dismissed(&e) => {}
+        Err(e) => ui.set_stat(&id, &format!("选择文件失败：{e}")),
+    });
+}
+
+/// 清空数据：确认（破坏性）→ 后台清空重建 → 行内回填「空目录」。
+fn clear_data_confirmed(ui: Rc<Ui>, win: Option<gtk::Window>, id: String) {
+    confirm_action(
+        win,
+        "清空数据？",
+        &format!("将删除「{id}」的全部插件数据文件，不可恢复。"),
+        "清空",
+        true,
+        ui.clone(),
+        id,
+        clear_data_action,
+    );
+}
+
+fn clear_data_action(ui: Rc<Ui>, _win: Option<gtk::Window>, id: String) {
+    if ui.busy.get() {
+        return;
+    }
+    ui.busy.set(true);
+    ui.set_stat(&id, "清空中…");
+    let slot: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
+    let slot2 = slot.clone();
+    let id2 = id.clone();
+    std::thread::spawn(move || {
+        let r = yihu_core::datactl::clear_data(&plugins::plugin_data_dir(&id2))
+            .map_err(|e| e.to_string());
+        *slot2.lock().unwrap() = Some(r);
+    });
+    let ui = ui.clone();
+    let id = id.clone();
+    glib::timeout_add_local(Duration::from_millis(150), move || {
+        let Some(r) = slot.lock().unwrap().take() else {
+            return glib::ControlFlow::Continue;
+        };
+        ui.busy.set(false);
+        match r {
+            Ok(()) => ui.set_stat(&id, "空目录"),
+            Err(e) => ui.set_stat(&id, &format!("清空失败：{e}")),
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+/// 两键确认弹窗（取消 / 确认）：确认后以 (ui, win, id) 继续动作。
+/// 用 adw::MessageDialog（GtkAlertDialogButton 属 GTK 4.14，本机特性集
+/// 未开）；确认响应即 "ok"。
+fn confirm_action(
+    win: Option<gtk::Window>,
+    title: &str,
+    detail: &str,
+    ok_label: &str,
+    destructive: bool,
+    ui: Rc<Ui>,
+    id: String,
+    cont: fn(Rc<Ui>, Option<gtk::Window>, String),
+) {
+    let dlg = adw::MessageDialog::new(win.as_ref(), Some(title), Some(detail));
+    dlg.add_response("cancel", "取消");
+    dlg.set_close_response("cancel");
+    dlg.add_response("ok", ok_label);
+    dlg.set_response_appearance(
+        "ok",
+        if destructive {
+            adw::ResponseAppearance::Destructive
+        } else {
+            adw::ResponseAppearance::Suggested
+        },
+    );
+    dlg.choose(gtk::gio::Cancellable::NONE, move |res| {
+        if res.as_str() == "ok" {
+            cont(ui, win, id);
+        }
+    });
+}
+
+/// FileDialog 的「用户取消/关闭」错误（静默忽略，不算失败）
+fn dialog_dismissed(e: &glib::Error) -> bool {
+    e.matches(gtk::DialogError::Cancelled) || e.matches(gtk::DialogError::Dismissed)
+}
+
+/// 统计文本：目录不存在 → 无数据；空 → 空目录；否则 N 个文件 · 体积
+fn fmt_data_stats(s: Option<(u64, u64)>) -> String {
+    match s {
+        None => "无数据".into(),
+        Some((0, _)) => "空目录".into(),
+        Some((n, b)) => format!("{n} 个文件 · {}", fmt_bytes(b)),
+    }
+}
+
+fn fmt_bytes(b: u64) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = b as f64;
+    let mut u = 0usize;
+    while v >= 1024.0 && u < units.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", units[u])
+    }
 }

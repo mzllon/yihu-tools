@@ -173,7 +173,9 @@ fn extract_and_install(
     Ok(manifest)
 }
 
-fn check_entry_name(name: &str) -> Result<(), String> {
+/// 条目名安全校验（穿越/绝对路径/反斜杠/NUL/盘符）。zip 安装与插件数据
+/// 导入共用（datactl）。
+pub(crate) fn check_entry_name(name: &str) -> Result<(), String> {
     let bad = |why: &str| Err::<(), String>(format!("条目名非法（{why}）：{name:?}"));
     if name.is_empty() || name.contains('\0') || name.contains('\\') || name.contains(':') {
         return bad("控制字符/反斜杠/冒号");

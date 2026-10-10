@@ -11,6 +11,8 @@
 //! M5 开放 API v2（2026-10-10）：带参能力 `network.fetch` /
 //! `settings.write` / `fs.write`——manifest 用「能力@参数」声明白名单
 //! （host / gsettings schema / 路径 glob），逐请求校验参数 ∈ 声明集合。
+//! M5 v2 扩容（2026-10-11）：`fs.read@glob`（宿主代读，canonicalize 复检
+//! 防符号链接逃逸）+ `clipboard.read`（宿主 gdk 异步读）。
 
 use yihu_core::permissions as perms;
 
@@ -27,6 +29,8 @@ const URI_SCHEMES: &[&str] = &["http", "https", "mailto"];
 pub const MAX_FETCH_BYTES: usize = 4 * 1024 * 1024;
 /// fs.write 单次写入上限
 pub const MAX_FSWRITE_BYTES: usize = 4 * 1024 * 1024;
+/// fs.read 单次读取上限
+pub const MAX_FSREAD_BYTES: usize = 4 * 1024 * 1024;
 /// settings.write 值长度上限
 pub const MAX_SETTING_VALUE: usize = 4096;
 
@@ -34,6 +38,8 @@ pub const MAX_SETTING_VALUE: usize = 4096;
 #[derive(Debug, Clone, PartialEq)]
 pub enum CapAction {
     ClipboardWrite(String),
+    /// 读剪贴板文本（宿主 gdk 异步读，结果经 capability_response.data 回传）
+    ClipboardRead,
     OpenUri(String),
     LaunchApp(String),
     Notify { summary: String, body: String },
@@ -47,6 +53,8 @@ pub enum CapAction {
     SettingsRead { schema_spec: String, key: String },
     /// 经宿主写文件（路径匹配声明 glob，UTF-8 原子写）
     FsWrite { path: String, text: String },
+    /// 经宿主读文件（canonicalize 后仍须命中声明 glob，UTF-8 文本回传）
+    FsRead { path: String },
 }
 
 /// 从 URL 提取 host[:port]（port 缺省按 scheme 补 443/80）。
@@ -123,6 +131,25 @@ pub fn normalize_path(path: &str, home: &str) -> Option<String> {
     Some(format!("/{}", parts.join("/")))
 }
 
+/// 路径是否命中声明 glob 集合（`~` 先展开 HOME；`*` 不跨层、`**` 才跨层：
+/// 防 Code* 越权匹配子目录）。fs.read / fs.write 共用。
+fn glob_hit(globs: &[String], norm: &str, home: &str) -> bool {
+    globs.iter().any(|g| {
+        let expanded = normalize_path(g, home).unwrap_or_default();
+        glob::Pattern::new(&expanded)
+            .map(|p| {
+                p.matches_with(
+                    norm,
+                    glob::MatchOptions {
+                        require_literal_separator: true,
+                        ..glob::MatchOptions::new()
+                    },
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// 授权 + 参数校验。`declared_raw` 是 manifest permissions 原始串
 ///（含「能力@参数」）。Err 文案直接回给插件（capability_response.error）。
 pub fn evaluate(
@@ -151,6 +178,12 @@ pub fn evaluate(
                 return Err(format!("text 超限（>{} 字节）", MAX_CLIPBOARD_BYTES));
             }
             Ok(CapAction::ClipboardWrite(text.to_string()))
+        }
+        perms::CLIPBOARD_READ => {
+            if !perms::has_plain(declared_raw, capability) {
+                return Err(format!("manifest 未声明能力 {capability}"));
+            }
+            Ok(CapAction::ClipboardRead)
         }
         perms::OPEN_URI => {
             if !perms::has_plain(declared_raw, capability) {
@@ -287,25 +320,34 @@ pub fn evaluate(
             let norm = normalize_path(path, &home)
                 .ok_or_else(|| format!("路径非法：{path:?}"))?;
             let globs = perms::params_of(declared_raw, capability);
-            let hit = globs.iter().any(|g| {
-                let expanded = normalize_path(g, &home).unwrap_or_default();
-                glob::Pattern::new(&expanded)
-                    .map(|p| {
-                        p.matches_with(
-                            &norm,
-                            glob::MatchOptions {
-                                // `*` 不跨目录、`**` 才跨层：防 Code* 越权匹配子目录
-                                require_literal_separator: true,
-                                ..glob::MatchOptions::new()
-                            },
-                        )
-                    })
-                    .unwrap_or(false)
-            });
-            if !hit {
+            if !glob_hit(&globs, &norm, &home) {
                 return Err(format!("路径 {norm} 不在声明白名单"));
             }
             Ok(CapAction::FsWrite { path: norm, text: text.to_string() })
+        }
+        perms::FS_READ => {
+            let path = get("path")?;
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+            let norm = normalize_path(path, &home)
+                .ok_or_else(|| format!("路径非法：{path:?}"))?;
+            let globs = perms::params_of(declared_raw, capability);
+            if !glob_hit(&globs, &norm, &home) {
+                return Err(format!("路径 {norm} 不在声明白名单"));
+            }
+            // 符号链接逃逸防御：声明目录内的链接可能指向声明外（如
+            // ~/.notes/x → /etc/shadow）。宿主实际会读 canonicalize 后的
+            // 真身，因此这里就按真身复检 glob；读不存在/非法链接同样在此
+            // 拒绝（缺文件在这里给出错误，执行线程不再重复判定）。
+            let canon = std::fs::canonicalize(&norm)
+                .map_err(|e| format!("文件不可读：{e}"))?
+                .display()
+                .to_string();
+            if canon != norm && !glob_hit(&globs, &canon, &home) {
+                return Err(format!(
+                    "路径 {norm} 经符号链接解析为 {canon}，超出声明白名单"
+                ));
+            }
+            Ok(CapAction::FsRead { path: canon })
         }
         // SELECTED_FILES_READ 不是主动请求的能力：query.context 由宿主
         // 决定是否携带，插件无从请求；出现即内部错误。
@@ -586,6 +628,65 @@ mod tests {
             &json!({"path":"~other/x","text":"x"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn clipboard_read_requires_declaration() {
+        let d = plain(&[perms::CLIPBOARD_READ]);
+        assert_eq!(
+            evaluate(&d, perms::CLIPBOARD_READ, &json!({})).unwrap(),
+            CapAction::ClipboardRead
+        );
+        let e = evaluate(&plain(&[]), perms::CLIPBOARD_READ, &json!({})).unwrap_err();
+        assert!(e.contains("未声明"), "{e}");
+    }
+
+    #[test]
+    fn fs_read_enforces_glob_and_symlink_escape() {
+        let base = std::env::temp_dir().join(format!("yihu-caps-fsread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let notes = base.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join("a.json"), "{}").unwrap();
+        // 声明目录内的链接指向声明外：必须被 canonicalize 复检拦下
+        std::os::unix::fs::symlink("/etc/passwd", notes.join("evil")).unwrap();
+
+        let d = declared(&[&format!("fs.read@{}/notes/**", base.display())]);
+        let a = evaluate(
+            &d,
+            perms::FS_READ,
+            &json!({"path": format!("{}/notes/a.json", base.display())}),
+        )
+        .unwrap();
+        assert!(matches!(a, CapAction::FsRead { .. }));
+
+        // 符号链接：名字命中 glob，但真身 /etc/passwd 不在声明内 → 拒
+        let e = evaluate(
+            &d,
+            perms::FS_READ,
+            &json!({"path": format!("{}/notes/evil", base.display())}),
+        )
+        .unwrap_err();
+        assert!(e.contains("符号链接") || e.contains("声明白名单"), "{e}");
+
+        // 不存在的文件在授权期即报错（快反馈，不等执行线程）
+        let e = evaluate(
+            &d,
+            perms::FS_READ,
+            &json!({"path": format!("{}/notes/missing.json", base.display())}),
+        )
+        .unwrap_err();
+        assert!(e.contains("不可读"), "{e}");
+
+        // 声明外路径照常拒绝
+        let e = evaluate(
+            &d,
+            perms::FS_READ,
+            &json!({"path": format!("{}/other/a.json", base.display())}),
+        )
+        .unwrap_err();
+        assert!(e.contains("不在声明白名单"), "{e}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
