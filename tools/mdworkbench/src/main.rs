@@ -57,13 +57,53 @@ struct State {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // 只读预览窗（md.view 能力入口）：--view-html <已消毒 HTML 文件>。
+    // GApplication 默认会校验命令行并拒收未知选项——HANDLES_COMMAND_LINE 关掉。
+    if args.first().map(|s| s == "--view-html").unwrap_or(false) {
+        let html = args.get(1).cloned();
+        let app = Application::builder()
+            .application_id("tools.yihu.mdworkbench.view")
+            .flags(gio::ApplicationFlags::NON_UNIQUE | gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+            .build();
+        // HANDLES_COMMAND_LINE 下 activate 不自动触发：在命令行处理里手动拉起
+        app.connect_command_line(move |app, _cmd| {
+            app.activate();
+            0
+        });
+        app.connect_activate(move |app| build_view_ui(app, html.clone()));
+        app.run();
+        return;
+    }
+    let file = args.first().cloned();
     let app = Application::builder()
         .application_id(APP_ID)
-        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .flags(gio::ApplicationFlags::NON_UNIQUE | gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
-    let file = std::env::args().nth(1);
+    app.connect_command_line(move |app, _cmd| {
+        app.activate();
+        0
+    });
     app.connect_activate(move |app| build_ui(app, file.clone()));
     app.run();
+}
+
+/// 只读预览窗：消毒 HTML 直载，无编辑器无桥（md.view 能力的宿主侧渲染面）
+fn build_view_ui(app: &Application, html: Option<String>) {
+    let win = ApplicationWindow::builder()
+        .application(app)
+        .title("Markdown 预览")
+        .default_width(1000)
+        .default_height(760)
+        .build();
+    let view = WebView::new();
+    view.set_vexpand(true);
+    view.set_hexpand(true);
+    win.set_child(Some(&view));
+    if let Some(p) = html {
+        view.load_uri(&format!("file://{p}"));
+    }
+    win.present();
 }
 
 /// 资产落盘（幂等）：编辑器页 = include 内嵌，部署只带一个二进制

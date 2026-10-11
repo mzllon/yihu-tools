@@ -54,6 +54,8 @@ pub const QR_GENERATE: &str = "qr.generate";
 pub const QR_DECODE: &str = "qr.decode";
 /// 经宿主渲染 Markdown（pulldown-cmark：浏览器预览 / 转 HTML）
 pub const MD_RENDER: &str = "md.render";
+/// 经宿主打开 Markdown 预览窗（消毒渲染，只读 WebKit 窗；基座查看器）
+pub const MD_VIEW: &str = "md.view";
 
 /// v2 全部合法能力名（无参能力 + 带参能力的基名）
 pub const KNOWN: &[&str] = &[
@@ -75,6 +77,7 @@ pub const KNOWN: &[&str] = &[
     QR_GENERATE,
     QR_DECODE,
     MD_RENDER,
+    MD_VIEW,
 ];
 
 /// 允许带 @参数的能力基名
@@ -233,6 +236,7 @@ pub fn label(declared: &str) -> String {
             (QR_GENERATE, _) => "生成二维码（qrcode）".into(),
             (QR_DECODE, _) => "识别二维码（zbar）".into(),
             (MD_RENDER, _) => "渲染 Markdown".into(),
+            (MD_VIEW, _) => "Markdown 预览窗".into(),
             _ => d.capability,
         },
         Err(_) => declared.to_string(),
@@ -268,7 +272,7 @@ mod tests {
         // 无参 audio 能力合法
         validate(&s(&[AUDIO_STOP, AUDIO_VOLUME])).unwrap();
         // 无参 qr/md 能力合法
-        validate(&s(&[QR_GENERATE, QR_DECODE, MD_RENDER])).unwrap();
+        validate(&s(&[QR_GENERATE, QR_DECODE, MD_RENDER, MD_VIEW])).unwrap();
         // 无参能力带参数非法
         assert!(validate(&s(&["qr.generate@x"])).is_err());
         assert!(validate(&s(&["md.render@x"])).is_err());
@@ -346,6 +350,7 @@ mod tests {
         assert_eq!(label("qr.generate"), "生成二维码（qrcode）");
         assert_eq!(label("qr.decode"), "识别二维码（zbar）");
         assert_eq!(label("md.render"), "渲染 Markdown");
+        assert_eq!(label("md.view"), "Markdown 预览窗");
         assert_eq!(label("clipboard.write"), "写剪贴板（经宿主）");
         assert_eq!(label("clipboard.read"), "读剪贴板（经宿主）");
         assert_eq!(label("garbage"), "garbage");

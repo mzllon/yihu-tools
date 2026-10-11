@@ -1077,6 +1077,17 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
             spawn_mdrender_job(deps, &req, mode, text);
             return;
         }
+        Ok(crate::caps::CapAction::MdView { title, text }) => {
+            deps.audit.record(
+                &req.plugin,
+                req.gen,
+                &req.capability,
+                "grant",
+                &format!("{title} {} 字符", text.len()),
+            );
+            spawn_mdview_job(deps, &req, title, text);
+            return;
+        }
         // 读剪贴板：gdk 异步读（Wayland 下是到数据源的 IPC 往返，同步版
         // 会阻塞主循环——硬性规则 #1）。完成回调推 cap_async 槽走统一泵。
         Ok(crate::caps::CapAction::ClipboardRead) => {
@@ -1528,6 +1539,49 @@ fn qr_encode_png(text: &str) -> Result<String, String> {
     Ok(path.display().to_string())
 }
 
+/// Markdown 预览窗作业：消毒渲染 → 落盘 → 拉起 mdworkbench --view-html
+/// （WebKit 在 mdworkbench 进程，panel 因 gtk4 0.9 无法内嵌 WebKit）。
+fn spawn_mdview_job(deps: &Deps, req: &crate::sessions::CapRequest, title: String, text: String) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            let html = yihu_core::mdrender::render_html_sanitized(&text);
+            let name = format!(
+                "yihu-mdview-{:x}.html",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(name);
+            std::fs::write(&path, html.as_bytes()).map_err(|e| format!("写预览失败：{e}"))?;
+            let bin = sibling("mdworkbench");
+            let arg = path.display().to_string();
+            spawn_detached_checked(&bin.display().to_string(), &["--view-html", &arg])
+        })();
+        let (ok, error) = match result {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, e),
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            capability: "md.view".into(),
+            ok,
+            error,
+            path: String::new(),
+            png: None,
+            clipboard: false,
+            data: None,
+            notify: false,
+        });
+    });
+}
+
 /// Markdown 渲染作业：pulldown-cmark；preview = 写预览页 + gio open，
 /// html = HTML 文本回传（data）。
 fn spawn_mdrender_job(
@@ -1657,6 +1711,7 @@ fn execute_capability(action: crate::caps::CapAction) -> Result<(), String> {
         crate::caps::CapAction::QrGenerate { .. } => Ok(()),
         crate::caps::CapAction::QrDecode => Ok(()),
         crate::caps::CapAction::MdRender { .. } => Ok(()),
+        crate::caps::CapAction::MdView { .. } => Ok(()),
     }
 }
 

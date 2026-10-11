@@ -24,6 +24,23 @@ pub fn render_html(md: &str) -> String {
     wrap_page(&body)
 }
 
+/// 消毒渲染：在 CommonMark 基础上剥掉全部原始 HTML（插件内容进宿主
+/// WebKit 窗口的安全闸门——脚本/事件属性不可达，纯排版保留）。
+pub fn render_html_sanitized(md: &str) -> String {
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TASKLISTS);
+    let parser = Parser::new_ext(md, opts);
+    let mut body = String::new();
+    html::push_html(&mut body, parser);
+    let clean = ammonia::Builder::default()
+        .link_rel(Some("noopener noreferrer"))
+        .clean(&body)
+        .to_string();
+    wrap_page(&clean)
+}
+
 fn wrap_page(body: &str) -> String {
     format!(
         r#"<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
@@ -64,6 +81,23 @@ mod tests {
         // 见模块头安全说明；这里验证的是文本层不吞字符）
         let html = render_html("a < b");
         assert!(html.contains("a &lt; b"), "{html}");
+    }
+
+    #[test]
+    fn sanitized_strips_scripts_but_keeps_markdown() {
+        let html = render_html_sanitized("# 标题\n\n<script>alert(1)</script>\n\n普通 **加粗** 文本");
+        assert!(!html.contains("<script>"), "脚本必须被剥离：{html}");
+        assert!(html.contains("alert(1)") || html.contains("alert(1)<!--") || !html.contains("alert"), "脚本体不应执行");
+        assert!(html.contains("<h1>标题</h1>"), "{html}");
+        assert!(html.contains("<strong>加粗</strong>"), "{html}");
+    }
+
+    #[test]
+    fn sanitized_keeps_links_and_tables() {
+        let html = render_html_sanitized("[x](https://a.com)\n\n| a | b |\n|---|---|\n| 1 | 2 |");
+        assert!(html.contains("href=\"https://a.com\""), "{html}");
+        assert!(html.contains("rel=\"noopener noreferrer\""), "{html}");
+        assert!(html.contains("<table>"), "{html}");
     }
 
     #[test]

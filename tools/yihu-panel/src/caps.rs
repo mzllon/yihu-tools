@@ -67,6 +67,8 @@ pub enum CapAction {
     QrDecode,
     /// 经宿主渲染 Markdown（pulldown-cmark；mode=preview 浏览器预览 / html 回传）
     MdRender { mode: String, text: String },
+    /// 经宿主打开只读 Markdown 预览窗（ammonia 消毒后 WebKit 渲染）
+    MdView { title: String, text: String },
 }
 
 /// 从 URL 提取 host[:port]（port 缺省按 scheme 补 443/80）。
@@ -335,6 +337,24 @@ pub fn evaluate(
                 text: text.to_string(),
             })
         }
+        perms::MD_VIEW => {
+            if !perms::has_plain(declared_raw, capability) {
+                return Err(format!("manifest 未声明能力 {capability}"));
+            }
+            let title = params
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("预览")
+                .to_string();
+            if title.len() > 200 {
+                return Err("title 超限（>200 字节）".into());
+            }
+            let text = get("text")?;
+            if text.is_empty() || text.len() > 1024 * 1024 {
+                return Err(format!("text 长度非法（1-1MiB 字节）：{}", text.len()));
+            }
+            Ok(CapAction::MdView { title, text: text.to_string() })
+        }
         perms::SETTINGS_WRITE => {
             let schema = get("schema")?;
             let key = get("key")?;
@@ -561,7 +581,7 @@ mod tests {
 
     #[test]
     fn qr_md_caps_validate_params() {
-        let d = declared(&["qr.generate", "qr.decode", "md.render"]);
+        let d = declared(&["qr.generate", "qr.decode", "md.render", "md.view"]);
         let a = evaluate(&d, perms::QR_GENERATE, &json!({"text": "hello"})).unwrap();
         assert!(matches!(a, CapAction::QrGenerate { .. }));
         // 超长/空/控制字符拒绝
@@ -580,6 +600,12 @@ mod tests {
         ));
         assert!(evaluate(&d, perms::MD_RENDER, &json!({"mode": "post", "text": "x"})).is_err());
         assert!(evaluate(&d, perms::MD_RENDER, &json!({"mode": "html", "text": ""})).is_err());
+        // md.view：title 超限/空内容拒绝；正常通过
+        assert!(evaluate(&d, perms::MD_VIEW, &json!({"title": "t", "text": "# hi"})).is_ok());
+        assert!(evaluate(&d, perms::MD_VIEW, &json!({"title": "", "text": "# hi"})).is_ok());
+        assert!(evaluate(&d, perms::MD_VIEW, &json!({"title": "t", "text": ""})).is_err());
+        assert!(evaluate(&d, perms::MD_VIEW,
+            &json!({"title": "x".repeat(201), "text": "# hi"})).is_err());
     }
 
     #[test]

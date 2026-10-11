@@ -134,15 +134,27 @@ def main():
             text = values.get("text", "")
             CURRENT["name"], CURRENT["text"] = name, text
 
-            if ev == "action:preview" or ev == "action:tohtml":
+            if ev == "action:preview":
+                # 预览走 md.view 基座查看器（应用内 WebKit 窗，消毒渲染）
                 if not text.strip():
                     UI_SEQ += 1
                     send(ui_spec(UI_SEQ, name, text, [err_row("内容为空")]))
                     continue
-                mode = "preview" if ev == "action:preview" else "html"
+                send({"type": "capability_request", "id": 5100,
+                      "capability": "md.view",
+                      "params": {"title": name or "笔记预览", "text": text[:1048576]}})
+                UI_SEQ += 1
+                send(ui_spec(UI_SEQ, name, text,
+                             [{"title": "⏳ 已打开预览窗", "subtitle": "消毒渲染 · 只读"}]))
+
+            elif ev == "action:tohtml":
+                if not text.strip():
+                    UI_SEQ += 1
+                    send(ui_spec(UI_SEQ, name, text, [err_row("内容为空")]))
+                    continue
                 send({"type": "capability_request", "id": 5100,
                       "capability": "md.render",
-                      "params": {"mode": mode, "text": text[:1048576]}})
+                      "params": {"mode": "html", "text": text[:1048576]}})
                 UI_SEQ += 1
                 send(ui_spec(UI_SEQ, name, text,
                              [{"title": "⏳ 渲染中…", "subtitle": "pulldown-cmark 宿主代渲染"}]))

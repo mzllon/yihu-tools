@@ -12,3 +12,4 @@ toml = "0.8"
 libc = "0.2"
 sha2 = "0.10"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+ammonia = "4.2.3"
