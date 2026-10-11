@@ -1,0 +1,13 @@
+id = "quicknotes"
+name = "待办便签"
+version = "0.1.0"
+api = "^1"
+entry = "quicknotes.py"
+icon = "view-list-symbolic"
+
+[[triggers]]
+keywords = ["todo", "待办", "便签", "quicknotes"]
+
+# 便签钉窗：宿主 WebKit 便签窗（TOAST UI Markdown），id 寻址本插件数据目录
+# stickies/<id>.md——内容归插件，桌面编辑自动存回同一文件
+permissions = ["sticky.pin", "sticky.close"]

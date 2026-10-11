@@ -69,6 +69,11 @@ pub enum CapAction {
     MdRender { mode: String, text: String },
     /// 经宿主打开只读 Markdown 预览窗（ammonia 消毒后 WebKit 渲染）
     MdView { title: String, text: String },
+    /// 经宿主钉出文本便签窗（内容文件 = 插件数据目录 stickies/<id>.md，
+    /// id 寻址；桌面编辑自动存回同一文件）
+    StickyPin { id: String },
+    /// 经宿主关闭便签窗（文件归插件管理）
+    StickyClose { id: String },
 }
 
 /// 从 URL 提取 host[:port]（port 缺省按 scheme 补 443/80）。
@@ -355,6 +360,25 @@ pub fn evaluate(
             }
             Ok(CapAction::MdView { title, text: text.to_string() })
         }
+        perms::STICKY_PIN | perms::STICKY_CLOSE => {
+            if !perms::has_plain(declared_raw, capability) {
+                return Err(format!("manifest 未声明能力 {capability}"));
+            }
+            let id = get("id")?;
+            if id.is_empty()
+                || id.len() > 64
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                return Err(format!("id 非法（1-64 位小写/数字/-）：{id:?}"));
+            }
+            if capability == perms::STICKY_PIN {
+                Ok(CapAction::StickyPin { id: id.to_string() })
+            } else {
+                Ok(CapAction::StickyClose { id: id.to_string() })
+            }
+        }
         perms::SETTINGS_WRITE => {
             let schema = get("schema")?;
             let key = get("key")?;
@@ -606,6 +630,21 @@ mod tests {
         assert!(evaluate(&d, perms::MD_VIEW, &json!({"title": "t", "text": ""})).is_err());
         assert!(evaluate(&d, perms::MD_VIEW,
             &json!({"title": "x".repeat(201), "text": "# hi"})).is_err());
+    }
+
+    #[test]
+    fn sticky_caps_validate_id() {
+        let d = declared(&["sticky.pin", "sticky.close"]);
+        let a = evaluate(&d, perms::STICKY_PIN, &json!({"id": "note-1"})).unwrap();
+        assert!(matches!(a, CapAction::StickyPin { .. }));
+        let a = evaluate(&d, perms::STICKY_CLOSE, &json!({"id": "note-1"})).unwrap();
+        assert!(matches!(a, CapAction::StickyClose { .. }));
+        // id 形状：大写/斜杠/超长/空全拒
+        for bad in ["Note", "a/b", "", &["x"; 65].concat()] {
+            assert!(evaluate(&d, perms::STICKY_PIN, &json!({"id": bad})).is_err(), "{bad:?}");
+        }
+        let e = evaluate(&plain(&[]), perms::STICKY_PIN, &json!({"id": "a"})).unwrap_err();
+        assert!(e.contains("未声明"), "{e}");
     }
 
     #[test]

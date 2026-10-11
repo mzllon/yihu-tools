@@ -56,6 +56,11 @@ pub const QR_DECODE: &str = "qr.decode";
 pub const MD_RENDER: &str = "md.render";
 /// 经宿主打开 Markdown 预览窗（消毒渲染，只读 WebKit 窗；基座查看器）
 pub const MD_VIEW: &str = "md.view";
+/// 经宿主钉出文本便签窗（Markdown 编辑，自动存回插件数据目录；
+/// id 寻址：内容文件 = 插件数据目录 stickies/<id>.md，插件与桌面编辑共用）
+pub const STICKY_PIN: &str = "sticky.pin";
+/// 经宿主关闭已钉出的便签窗（文件归插件管理，宿主只关窗）
+pub const STICKY_CLOSE: &str = "sticky.close";
 
 /// v2 全部合法能力名（无参能力 + 带参能力的基名）
 pub const KNOWN: &[&str] = &[
@@ -78,6 +83,8 @@ pub const KNOWN: &[&str] = &[
     QR_DECODE,
     MD_RENDER,
     MD_VIEW,
+    STICKY_PIN,
+    STICKY_CLOSE,
 ];
 
 /// 允许带 @参数的能力基名
@@ -237,6 +244,8 @@ pub fn label(declared: &str) -> String {
             (QR_DECODE, _) => "识别二维码（zbar）".into(),
             (MD_RENDER, _) => "渲染 Markdown".into(),
             (MD_VIEW, _) => "Markdown 预览窗".into(),
+            (STICKY_PIN, _) => "钉出便签窗".into(),
+            (STICKY_CLOSE, _) => "关闭便签窗".into(),
             _ => d.capability,
         },
         Err(_) => declared.to_string(),
@@ -272,7 +281,9 @@ mod tests {
         // 无参 audio 能力合法
         validate(&s(&[AUDIO_STOP, AUDIO_VOLUME])).unwrap();
         // 无参 qr/md 能力合法
-        validate(&s(&[QR_GENERATE, QR_DECODE, MD_RENDER, MD_VIEW])).unwrap();
+        validate(&s(&[QR_GENERATE, QR_DECODE, MD_RENDER, MD_VIEW, STICKY_PIN, STICKY_CLOSE]))
+            .unwrap();
+        assert!(validate(&s(&["sticky.pin@x"])).is_err());
         // 无参能力带参数非法
         assert!(validate(&s(&["qr.generate@x"])).is_err());
         assert!(validate(&s(&["md.render@x"])).is_err());
@@ -351,6 +362,8 @@ mod tests {
         assert_eq!(label("qr.decode"), "识别二维码（zbar）");
         assert_eq!(label("md.render"), "渲染 Markdown");
         assert_eq!(label("md.view"), "Markdown 预览窗");
+        assert_eq!(label("sticky.pin"), "钉出便签窗");
+        assert_eq!(label("sticky.close"), "关闭便签窗");
         assert_eq!(label("clipboard.write"), "写剪贴板（经宿主）");
         assert_eq!(label("clipboard.read"), "读剪贴板（经宿主）");
         assert_eq!(label("garbage"), "garbage");

@@ -1088,6 +1088,18 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
             spawn_mdview_job(deps, &req, title, text);
             return;
         }
+        Ok(crate::caps::CapAction::StickyPin { id }) => {
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", &id);
+            spawn_sticky_job(deps, &req, &id, false);
+            return;
+        }
+        Ok(crate::caps::CapAction::StickyClose { id }) => {
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", &id);
+            spawn_sticky_job(deps, &req, &id, true);
+            return;
+        }
         // 读剪贴板：gdk 异步读（Wayland 下是到数据源的 IPC 往返，同步版
         // 会阻塞主循环——硬性规则 #1）。完成回调推 cap_async 槽走统一泵。
         Ok(crate::caps::CapAction::ClipboardRead) => {
@@ -1539,6 +1551,49 @@ fn qr_encode_png(text: &str) -> Result<String, String> {
     Ok(path.display().to_string())
 }
 
+/// 便签窗作业：id 寻址插件数据目录 stickies/<id>.md → 拉起/关闭 mdworkbench
+/// 便签窗。内容所有权归插件（写文件）；桌面编辑自动存回同一文件。
+fn spawn_sticky_job(deps: &Deps, req: &crate::sessions::CapRequest, id: &str, close: bool) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    let id = id.to_string();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            let dir = yihu_core::plugins::plugin_data_dir(&plugin)
+                .join("stickies");
+            std::fs::create_dir_all(&dir).map_err(|e| format!("创建便签目录失败：{e}"))?;
+            let path = dir.join(format!("{id}.md"));
+            if !path.exists() && !close {
+                std::fs::write(&path, "").map_err(|e| format!("建便签文件失败：{e}"))?;
+            }
+            let flag = if close { "--sticky-close" } else { "--sticky" };
+            spawn_detached_checked(
+                &sibling("mdworkbench").display().to_string(),
+                &[flag, &path.display().to_string()],
+            )
+        })();
+        let (ok, error) = match result {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, e),
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            capability: if close { "sticky.close" } else { "sticky.pin" }.into(),
+            ok,
+            error,
+            path: String::new(),
+            png: None,
+            clipboard: false,
+            data: None,
+            notify: false,
+        });
+    });
+}
+
 /// Markdown 预览窗作业：消毒渲染 → 落盘 → 拉起 mdworkbench --view-html
 /// （WebKit 在 mdworkbench 进程，panel 因 gtk4 0.9 无法内嵌 WebKit）。
 fn spawn_mdview_job(deps: &Deps, req: &crate::sessions::CapRequest, title: String, text: String) {
@@ -1712,6 +1767,8 @@ fn execute_capability(action: crate::caps::CapAction) -> Result<(), String> {
         crate::caps::CapAction::QrDecode => Ok(()),
         crate::caps::CapAction::MdRender { .. } => Ok(()),
         crate::caps::CapAction::MdView { .. } => Ok(()),
+        crate::caps::CapAction::StickyPin { .. } => Ok(()),
+        crate::caps::CapAction::StickyClose { .. } => Ok(()),
     }
 }
 

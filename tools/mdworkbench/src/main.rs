@@ -31,6 +31,7 @@ const DARK_CSS: &[u8] = include_bytes!("../assets/toastui-editor-dark.css");
 const HIGHLIGHT_JS: &[u8] =
     include_bytes!("../assets/toastui-editor-plugin-code-syntax-highlight-all.min.js");
 const MERMAID_JS: &[u8] = include_bytes!("../assets/mermaid.min.js");
+const STICKY_HTML: &str = include_str!("../assets/sticky.html");
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 
 const WELCOME: &str = "# 欢迎使用 Markdown 工作台\n\n直接开始输入 —— 这是**所见即所得**编辑器。\n\n- 工具栏可切换 Markdown / 所见即所得模式\n- 表格、任务列表、删除线都支持\n- 顶部按钮：打开文件夹、保存、导出\n";
@@ -57,35 +58,218 @@ struct State {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    // 只读预览窗（md.view 能力入口）：--view-html <已消毒 HTML 文件>。
-    // GApplication 默认会校验命令行并拒收未知选项——HANDLES_COMMAND_LINE 关掉。
-    if args.first().map(|s| s == "--view-html").unwrap_or(false) {
-        let html = args.get(1).cloned();
-        let app = Application::builder()
-            .application_id("tools.yihu.mdworkbench.view")
-            .flags(gio::ApplicationFlags::NON_UNIQUE | gio::ApplicationFlags::HANDLES_COMMAND_LINE)
-            .build();
-        // HANDLES_COMMAND_LINE 下 activate 不自动触发：在命令行处理里手动拉起
-        app.connect_command_line(move |app, _cmd| {
-            app.activate();
-            0
-        });
-        app.connect_activate(move |app| build_view_ui(app, html.clone()));
-        app.run();
-        return;
-    }
-    let file = args.first().cloned();
+    // 唯一实例：后续拉起（面板/便签能力/预览能力）经 GApplication 把参数
+    // 转发到主进程的 ::command-line，由 dispatch 开窗——一个 WebKit 进程
+    // 承载编辑窗/预览窗/全部便签窗。
     let app = Application::builder()
         .application_id(APP_ID)
-        .flags(gio::ApplicationFlags::NON_UNIQUE | gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
-    app.connect_command_line(move |app, _cmd| {
-        app.activate();
+    app.connect_command_line(move |app, cmd| {
+        let args: Vec<String> = cmd
+            .arguments()
+            .iter()
+            .map(|s| s.to_string_lossy().to_string())
+            .skip(1)
+            .collect();
+        dispatch(app, &args);
         0
     });
-    app.connect_activate(move |app| build_ui(app, file.clone()));
     app.run();
+}
+
+/// 命令行分发（主实例）：--sticky / --sticky-close / --view-html / 编辑窗
+fn dispatch(app: &Application, args: &[String]) {
+    match args.first().map(|s| s.as_str()) {
+        Some("--sticky") => {
+            if let Some(p) = args.get(1) {
+                open_sticky(app, PathBuf::from(p));
+            }
+        }
+        Some("--sticky-close") => {
+            if let Some(p) = args.get(1) {
+                close_sticky(&PathBuf::from(p));
+            }
+        }
+        Some("--view-html") => {
+            if let Some(p) = args.get(1) {
+                build_view_ui(app, Some(p.clone()));
+            }
+        }
+        _ => build_ui(app, args.first().cloned()),
+    }
+}
+
+// ---- 便签窗（Markdown 快贴，自动存回插件数据目录） ------------------------
+
+thread_local! {
+    static STICKIES: RefCell<Vec<(PathBuf, Rc<StickyWin>)>> = const { RefCell::new(Vec::new()) };
+}
+
+struct StickyWin {
+    win: gtk::Window,
+}
+
+/// 打开（或置前）一张便签：id 寻址文件，内容随编辑自动存回
+fn open_sticky(app: &Application, path: PathBuf) {
+    let existing = STICKIES.with(|s| {
+        s.borrow()
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, w)| w.clone())
+    });
+    if let Some(w) = existing {
+        w.win.present();
+        return;
+    }
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let win = gtk::Window::new();
+    win.set_decorated(false);
+    win.set_resizable(true);
+    win.set_default_size(300, 340);
+    win.set_title(Some("便签"));
+    // 必须挂到 Application：未关联窗口不占用 use count，
+    // GApplication 会在 use count 归零时直接退出（进程秒退的根因）
+    win.set_application(Some(app));
+
+    let root = gtk::Box::new(Orientation::Vertical, 0);
+
+    // 拖动把手 + 关闭
+    let handle = gtk::Box::new(Orientation::Horizontal, 4);
+    let grip = Label::new(Some("≡"));
+    grip.set_halign(gtk::Align::Start);
+    grip.set_margin_start(8);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let title_lbl = Label::new(Some(&stem));
+    title_lbl.set_hexpand(true);
+    title_lbl.set_halign(gtk::Align::Start);
+    handle.append(&grip);
+    handle.append(&title_lbl);
+    let close_btn = Button::with_label("✕");
+    close_btn.add_css_class("flat");
+    handle.append(&close_btn);
+    handle.add_css_class("toolbar");
+    root.append(&handle);
+
+    let ucm = UserContentManager::new();
+    let view = WebView::builder().user_content_manager(&ucm).build();
+    view.set_vexpand(true);
+    view.set_hexpand(true);
+    root.append(&view);
+
+    win.set_child(Some(&root));
+
+    let st = Rc::new(StickyWin { win: win.clone() });
+
+    // 拖动 = 原生移动（按住把手任意处拖）
+    {
+        let w2 = win.clone();
+        let click = gtk::GestureClick::new();
+        click.set_button(1);
+        click.connect_pressed(move |_g, _n, x, y| {
+            let seat = gtk::prelude::RootExt::display(&w2).default_seat();
+            if let (Some(surface), Some(device)) =
+                (w2.surface(), seat.and_then(|s| s.pointer()))
+            {
+                use gtk::glib::translate::{FromGlibPtrBorrow, ToGlibPtr};
+                let raw = <gtk::gdk::Surface as gtk::glib::translate::ToGlibPtr<
+                    *const gtk::gdk::ffi::GdkSurface,
+                >>::to_glib_none(&surface)
+                .0 as *mut gtk::gdk::ffi::GdkToplevel;
+                let toplevel = unsafe { gtk::gdk::Toplevel::from_glib_borrow(raw) };
+                toplevel.begin_move(&device, 1, x, y, gtk::gdk::CURRENT_TIME);
+            }
+        });
+        handle.add_controller(click);
+    }
+    let st_close = st.clone();
+    close_btn.connect_clicked(move |_| st_close.win.close());
+    {
+        let path2 = path.clone();
+        win.connect_close_request(move |_w| {
+            STICKIES.with(|s| s.borrow_mut().retain(|(p, _)| *p != path2));
+            glib::Propagation::Proceed
+        });
+    }
+
+    // 编辑 → 自动存回（防抖 500ms）
+    let ucm2 = ucm.clone();
+    {
+        let path2 = path.clone();
+        ucm2.register_script_message_handler("yihu", None);
+        let save_timer: std::rc::Rc<RefCell<Option<glib::SourceId>>> =
+            std::rc::Rc::new(RefCell::new(None));
+        ucm2.connect_script_message_received(Some("yihu"), move |_ucm, value| {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&value.to_str()) else {
+                return;
+            };
+            match v.get("type").and_then(|t| t.as_str()) {
+                Some("changed") => {
+                    let path3 = path2.clone();
+                    let timer_cell = save_timer.clone();
+                    if let Some(id) = timer_cell.borrow_mut().take() {
+                        id.remove();
+                    }
+                    let view2 = view.clone();
+                    let id = glib::timeout_add_local(
+                        std::time::Duration::from_millis(500),
+                        move || {
+                            let path4 = path3.clone();
+                            view2.evaluate_javascript(
+                                "window.yihuGetMd()",
+                                None,
+                                None,
+                                Option::<&gio::Cancellable>::None,
+                                move |res| {
+                                    if let Ok(v) = res {
+                                        let md = v.to_str();
+                                        let _ = std::fs::write(&path4, md.as_bytes());
+                                    }
+                                },
+                            );
+                            glib::ControlFlow::Break
+                        },
+                    );
+                    *timer_cell.borrow_mut() = Some(id);
+                }
+                Some("ready") => {
+                    let text = std::fs::read_to_string(&path2).unwrap_or_default();
+                    let literal =
+                        serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".into());
+                    let script = format!("window.yihuSetMd({literal});");
+                    view.evaluate_javascript(
+                        &script,
+                        None,
+                        None,
+                        Option::<&gio::Cancellable>::None,
+                        |_| {},
+                    );
+                }
+                _ => {}
+            }
+        });
+    }
+
+    STICKIES.with(|s| s.borrow_mut().push((path, st)));
+    win.present();
+}
+
+fn close_sticky(path: &std::path::Path) {
+    STICKIES.with(|s| {
+        let hit = s
+            .borrow()
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, w)| w.clone());
+        if let Some(w) = hit {
+            w.win.close();
+            s.borrow_mut().retain(|(p, _)| p != path);
+        }
+    });
 }
 
 /// 只读预览窗：消毒 HTML 直载，无编辑器无桥（md.view 能力的宿主侧渲染面）
@@ -119,6 +303,7 @@ fn install_assets() -> Result<PathBuf, String> {
             HIGHLIGHT_JS,
         ),
         ("mermaid.min.js", MERMAID_JS),
+        ("sticky.html", STICKY_HTML.as_bytes()),
     ] {
         let path = dir.join(name);
         let same = std::fs::read(&path).map(|old| old == bytes).unwrap_or(false);
