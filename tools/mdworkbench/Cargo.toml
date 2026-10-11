@@ -7,6 +7,7 @@ edition = "2021"
 # 与面板（gtk4 0.9）因 links=gtk-4 不能同图，进程级外置（同中心应用惯例）。
 
 [dependencies]
+base64 = "0.22"
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
 serde_json = "1.0.152"
 webkit6 = "0.4"

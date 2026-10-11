@@ -1,13 +1,40 @@
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <link rel="stylesheet" href="toastui-editor.min.css">
-<link rel="stylesheet" href="toastui-editor-dark.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="toastui-editor-dark.css">
 <style>html,body{margin:0;height:100%}#editor{height:100%}
-body{font-family:system-ui,-apple-system,"Noto Sans CJK SC",sans-serif}</style>
+body{font-family:system-ui,-apple-system,"Noto Sans CJK SC",sans-serif}
+body.darkbg{background:#121212}
+.mermaid{text-align:center;background:#fff;border-radius:4px;padding:8px}</style>
 </head><body><div id="editor"></div>
 <script src="toastui-editor-all.min.js"></script>
+<script src="toastui-editor-plugin-code-syntax-highlight-all.min.js"></script>
+<script src="mermaid.min.js"></script>
 <script>
 function post(o){ try{ window.webkit.messageHandlers.yihu.postMessage(JSON.stringify(o)); }catch(e){} }
-let timer = null;
+function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+let currentDir = '';           // 当前 md 文件目录（相对图片解析为 file:// 显示）
+let pendingImage = {};         // id -> addImageBlobHook 回调
+let imageId = 0;
+let changeTimer = null;
+
+mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+
+function fileUrl(src){
+  try { return new URL(encodeURI(src), 'file://' + currentDir + '/').href; }
+  catch(e){ return src; }
+}
+function refreshMermaid(){
+  try { mermaid.run({ querySelector: '#editor .mermaid' }); } catch(e){}
+}
+function postOutline(){
+  const items = [];
+  for (const line of editor.getMarkdown().split('\n')) {
+    const m = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
+    if (m) items.push([m[1].length, m[2]]);
+  }
+  post({type:'outline', items});
+}
 const editor = new toastui.Editor({
   el: document.getElementById('editor'),
   height: '100%',
@@ -15,15 +42,81 @@ const editor = new toastui.Editor({
   previewStyle: 'vertical',
   usageStatistics: false,
   hideModeSwitch: false,
+  plugins: [toastui.Editor.plugin.codeSyntaxHighlight],
+  customHTMLRenderer: {
+    codeBlock(node) {
+      const lang = (node.getLanguage && node.getLanguage()) || '';
+      if (lang === 'mermaid') {
+        return `<div class="mermaid">${escapeHtml(node.literal || '')}</div>`;
+      }
+      return false; // 其余交给语法高亮插件
+    },
+    image(node) {
+      const src = node.destination || '';
+      const alt = (node.getChildren && node.getChildren()[0] && node.getChildren()[0].getLiteral) || '';
+      if (src && !/^(https?:|data:|file:|\/\/)/.test(src) && currentDir) {
+        return `<img src="${fileUrl(src)}" alt="${escapeHtml(alt)}">`;
+      }
+      return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}">`;
+    }
+  },
+  hooks: {
+    addImageBlobHook: (blob, cb) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const id = ++imageId;
+        pendingImage[id] = cb;
+        post({type:'image', id, name: blob.name || 'image.png', data: reader.result});
+      };
+      reader.readAsDataURL(blob);
+    }
+  },
   events: {
     change: () => {
-      if (timer) return;
-      timer = setTimeout(() => { timer = null; post({type:'changed'}); }, 300);
+      if (changeTimer) return;
+      changeTimer = setTimeout(() => {
+        changeTimer = null;
+        post({type:'changed'});
+        postOutline();
+        refreshMermaid();
+      }, 300);
     }
   }
 });
 window.yihuGetMd = () => editor.getMarkdown();
-window.yihuSetMd = (md) => { editor.setMarkdown(md, false); };
+window.yihuSetMd = (md) => { editor.setMarkdown(md, false); postOutline(); refreshMermaid(); };
 window.yihuSetMode = (m) => { editor.changeMode(m); };
+window.yihuSetDir = (d) => { currentDir = d; editor.setMarkdown(editor.getMarkdown(), false); };
+window.yihuTheme = (m) => {
+  const root = document.querySelector('.toastui-editor-defaultUI');
+  const dark = m === 'dark' || (m === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  if (root) root.classList.toggle('toastui-editor-dark', dark);
+  document.body.classList.toggle('darkbg', dark);
+  mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default', securityLevel: 'loose' });
+  refreshMermaid();
+};
+window.yihuCount = (term) => editor.getMarkdown().split(term).length - 1;
+window.yihuFindNext = (term) => {
+  if (editor.currentMode() === 'wysiwyg') { try { return window.find(term); } catch(e){ return false; } }
+  return false;
+};
+window.yihuReplaceAll = (term, repl) => {
+  const md = editor.getMarkdown();
+  const n = term ? md.split(term).length - 1 : 0;
+  if (n > 0) { editor.setMarkdown(md.split(term).join(repl), false); }
+  return n;
+};
+window.yihuScrollHeading = (idx) => {
+  const go = () => {
+    const hs = document.querySelectorAll('#editor h1,#editor h2,#editor h3,#editor h4,#editor h5,#editor h6');
+    if (hs[idx]) hs[idx].scrollIntoView({block:'start'});
+  };
+  if (editor.currentMode() !== 'wysiwyg') { editor.changeMode('wysiwyg'); setTimeout(go, 150); }
+  else go();
+};
+window.yihuImageSaved = (id, path) => {
+  const cb = pendingImage[id];
+  if (cb) { cb(path); delete pendingImage[id]; }
+};
 post({type:'ready'});
 </script></body></html>
