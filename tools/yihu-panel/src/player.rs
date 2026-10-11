@@ -192,11 +192,8 @@ impl RadioPlayer {
         if missing.is_empty() {
             return Ok(());
         }
-        Err(format!(
-            "缺少播放组件：{}（请安装：sudo apt install {}）",
-            missing.join("、"),
-            missing.join(" ")
-        ))
+        let hint = yihu_core::distro::install_hint(&missing);
+        Err(format!("缺少播放组件：{}（{}）", missing.join("、"), hint))
     }
 
     /// 播放 `stream_url`：清理孤儿播放进程与陈旧清单，启动清单镜像线程，

@@ -16,6 +16,7 @@ mod providers;
 mod sandbox;
 mod screenshot;
 mod sessions;
+mod status;
 mod ui;
 mod theme;
 mod service;

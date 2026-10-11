@@ -20,6 +20,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use gtk::gio;
 use yihu_core::plugins;
 
 use crate::market::{self, MarketPlugin};
@@ -37,6 +38,10 @@ struct Ui {
     /// 数据统计后台作业回填槽（id → (文件数, 字节数)；None = 目录不存在）
     stats_slot: Arc<Mutex<Option<HashMap<String, Option<(u64, u64)>>>>>,
     stats_pending: Cell<bool>,
+    /// 运行状态行（id → label），面板 D-Bus 查询回填
+    run_labels: std::cell::RefCell<HashMap<String, Label>>,
+    /// 面板 PluginStatus 查询结果槽（原始 JSON）
+    run_slot: Arc<Mutex<Option<String>>>,
 }
 
 /// 后台任务结果槽（阻塞调用不入 UI 主线程的既有惯例）
@@ -130,7 +135,18 @@ pub fn build_page() -> gtk::Widget {
         data_labels: std::cell::RefCell::new(HashMap::new()),
         stats_slot: Arc::new(Mutex::new(None)),
         stats_pending: Cell::new(false),
+        run_labels: std::cell::RefCell::new(HashMap::new()),
+        run_slot: Arc::new(Mutex::new(None)),
     });
+
+    // —— 运行状态自动刷新（3s；面板 /proc 实扫，查询本身线程化）——
+    {
+        let ui2 = ui.clone();
+        glib::timeout_add_local(Duration::from_secs(3), move || {
+            ui2.spawn_run_query();
+            glib::ControlFlow::Continue
+        });
+    }
 
     // —— 信号：目录/zip 安装（后台线程 + 轮询回填）——
     spawn_on_click(dir_btn, dir_entry, ui.clone(), move |src| {
@@ -277,6 +293,7 @@ impl Ui {
             self.installed_flow.remove(&child);
         }
         self.data_labels.borrow_mut().clear();
+        self.run_labels.borrow_mut().clear();
 
         let (installed, errors) = plugins::list_installed();
         let state = plugins::PluginsState::load();
@@ -341,6 +358,9 @@ impl Ui {
 
             // 权限徽章行
             card.append(&perm_badges(&inst.manifest.permissions));
+
+            // 运行状态行（M5 追加）：运行中/未运行 + 进程数/内存/CPU + 停止
+            card.append(&self.run_row(&id));
 
             // 数据行（M5）：统计 + 打开/导出/导入/清空
             card.append(&self.data_row(&id));
@@ -476,6 +496,52 @@ impl Ui {
             }
             glib::ControlFlow::Break
         });
+    }
+
+    /// 运行状态查询（面板 D-Bus PluginStatus，/proc 实扫聚合）
+    fn spawn_run_query(self: &Rc<Self>) {
+        let slot = self.run_slot.clone();
+        std::thread::spawn(move || {
+            let out = query_plugin_status();
+            *slot.lock().unwrap() = Some(out);
+        });
+        let ui = self.clone();
+        glib::timeout_add_local(Duration::from_millis(200), move || {
+            let Some(raw) = ui.run_slot.lock().unwrap().take() else {
+                return glib::ControlFlow::Continue;
+            };
+            apply_run_status(&ui, &raw);
+            glib::ControlFlow::Break
+        });
+    }
+
+    /// 运行状态行：状态文本 + 停止按钮
+    fn run_row(self: &Rc<Self>, id: &str) -> GtkBox {
+        let row = GtkBox::new(Orientation::Horizontal, 6);
+        let lbl = Label::new(Some("○ 状态查询中…"));
+        lbl.add_css_class("caption-sm");
+        lbl.set_halign(Align::Start);
+        lbl.set_hexpand(true);
+        lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        row.append(&lbl);
+        self.run_labels.borrow_mut().insert(id.to_string(), lbl);
+
+        let stop = Button::with_label("停止");
+        stop.add_css_class("flat");
+        stop.add_css_class("caption-sm");
+        stop.set_tooltip_text(Some("终止该插件的全部进程（不计失败，可重新呼出）"));
+        {
+            let id_owned = id.to_string();
+            stop.connect_clicked(move |_| {
+                let id2 = id_owned.clone();
+                std::thread::spawn(move || {
+                    let params = (id2,).to_variant();
+                    let _ = panel_call("PluginStop", Some(params));
+                });
+            });
+        }
+        row.append(&stop);
+        row
     }
 
     /// 数据行内联反馈（导出中…/已导出 等），不打断卡片布局
@@ -854,5 +920,63 @@ fn fmt_bytes(b: u64) -> String {
         format!("{b} B")
     } else {
         format!("{v:.1} {}", units[u])
+    }
+}
+
+// ---- 插件运行状态（面板 D-Bus） --------------------------------------------
+
+/// 面板 D-Bus 方法调用（tools.yihu.Panel）
+fn panel_call(method: &str, params: Option<glib::Variant>) -> Result<glib::Variant, glib::Error> {
+    let conn = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)?;
+    conn.call_sync(
+        Some("tools.yihu.Panel"),
+        "/tools/yihu/Panel",
+        "tools.yihu.Panel",
+        method,
+        params.as_ref(),
+        None,
+        gio::DBusCallFlags::NONE,
+        3000,
+        gio::Cancellable::NONE,
+    )
+}
+
+fn query_plugin_status() -> String {
+    match panel_call("PluginStatus", None) {
+        Ok(v) => v.str().unwrap_or("[]").to_string(),
+        Err(_) => "[]".into(),
+    }
+}
+
+/// 解析状态 JSON 并回填各卡片状态行
+fn apply_run_status(ui: &Rc<Ui>, raw: &str) {
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+        return;
+    };
+    for it in items {
+        let Some(id) = it.get("id").and_then(|x| x.as_str()) else { continue };
+        let lbl = ui.run_labels.borrow().get(id).cloned();
+        let running = it.get("running").and_then(|x| x.as_bool()).unwrap_or(false);
+        let resident = it.get("resident").and_then(|x| x.as_bool()).unwrap_or(false);
+        let enabled = it.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+        let procs = it.get("procs").and_then(|x| x.as_u64()).unwrap_or(0);
+        let rss_kb = it.get("rss_kb").and_then(|x| x.as_u64()).unwrap_or(0);
+        let cpu = it.get("cpu_percent").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let Some(lbl) = lbl else { continue };
+        let text = if running {
+            let tag = if resident { "（常驻）" } else { "" };
+            format!("● 运行中{tag} · {procs} 进程 · {:.1} MB · CPU {cpu:.0}%", rss_kb as f64 / 1024.0)
+        } else if !enabled {
+            "○ 已停用".to_string()
+        } else if resident {
+            "○ 未运行 · 常驻位空闲".to_string()
+        } else {
+            "○ 未运行 · 呼出面板时拉起".to_string()
+        };
+        lbl.set_text(&text);
+        lbl.remove_css_class("success");
+        if running {
+            lbl.add_css_class("success");
+        }
     }
 }

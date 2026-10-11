@@ -357,6 +357,28 @@ impl PluginMgr {
         }
     }
 
+    /// 用户显式停止指定插件：SIGKILL 进程组并移除会话，
+    /// **不计入失败统计**（与崩溃/超时不同，是用户主动操作）
+    pub fn kill_plugin(&mut self, id: &str) -> bool {
+        let before = self.sessions.len();
+        self.sessions.retain(|s| {
+            if s.id == id {
+                unsafe {
+                    libc::kill(-(s.child.id() as i32), libc::SIGKILL);
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if self.sessions.len() != before {
+            self.latest.remove(id);
+            true
+        } else {
+            false
+        }
+    }
+
     /// 指定插件是否还有存活会话（播放属主死亡检查用）
     pub fn has_session(&self, id: &str) -> bool {
         self.sessions.iter().any(|s| s.id == id)
@@ -823,6 +845,42 @@ for line in sys.stdin:
     elif t == "shutdown":
         sys.exit(0)
 "#;
+
+    #[test]
+    fn kill_plugin_removes_session_without_failures() {
+        if !python3_available() {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("yihu-kill-plugin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        make_registry(&base);
+        let mut mgr = PluginMgr::new();
+        mgr.ensure_sessions_in(&base, &base);
+        assert!(mgr.has_session("fake-plugin"), "前置：会话已建立");
+        // 用户停止：会话移除、进程组终止、不计失败
+        assert!(mgr.kill_plugin("fake-plugin"));
+        assert!(!mgr.has_session("fake-plugin"));
+        // 进程真死了：/proc cmdline 精确查注册表路径（SIGKILL 后内核回收
+        // 有延迟，轮询等待；路径含运行时 pid，不会误伤同字样的无关进程）
+        let marker = format!("{}/fake-plugin", base.display());
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let any_alive = std::fs::read_dir("/proc")
+                .unwrap()
+                .flatten()
+                .filter(|p| p.file_name().to_string_lossy().parse::<i32>().is_ok())
+                .filter_map(|p| std::fs::read_to_string(p.path().join("cmdline")).ok())
+                .any(|c| c.contains(&marker));
+            if !any_alive || std::time::Instant::now() > deadline {
+                assert!(!any_alive, "fake-plugin 进程应已终止");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // 无失败记录：未触发连续失败禁用
+        assert!(mgr.disabled_by_failures.is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     fn python3_available() -> bool {
         std::process::Command::new("python3")

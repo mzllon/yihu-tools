@@ -2,7 +2,7 @@ id = "devcodec"
 name = "开发者编码工具箱"
 version = "0.1.0"
 api = "^1"
-entry = "devcodec.py"
+entry = "devcodec"
 icon = "applications-utilities"
 
 [[triggers]]

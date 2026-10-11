@@ -1,0 +1,13 @@
+[package]
+name = "yihu-plugin-sdk"
+version = "0.1.0"
+edition = "2021"
+
+# 官方 Rust 插件运行时（M5 追加，跨平台决策：官方=Rust 原生）：
+# stdio 行式 JSON 协议循环 + 消息分发 + 能力客户端发射器。
+# 插件只需实现 Handler 的四个回调，协议细节（init→ready、shutdown、
+# JSON 转义）由 SDK 托管。
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -2,7 +2,7 @@ id = "randgen"
 name = "随机数生成器"
 version = "0.1.0"
 api = "^1"
-entry = "randgen.py"
+entry = "randgen"
 icon = "applications-games"
 
 [[triggers]]

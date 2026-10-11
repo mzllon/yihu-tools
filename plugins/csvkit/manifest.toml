@@ -2,7 +2,7 @@ id = "csvkit"
 name = "CSV ⇄ JSON"
 version = "0.1.0"
 api = "^1"
-entry = "csvkit.py"
+entry = "csvkit"
 icon = "x-office-spreadsheet"
 
 [[triggers]]

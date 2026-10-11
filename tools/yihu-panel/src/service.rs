@@ -31,6 +31,8 @@ pub enum Cmd {
     /// 截图快捷键触发（全局热键 → `yihu-panel shot`）：宿主直接经
     /// portal 交互截屏（与截图插件的 screenshot.take 同一实现）。
     Screenshot,
+    /// 中心插件页「停止」：杀灭指定插件的进程组（不计失败统计）
+    PluginStop(String),
 }
 
 pub struct PanelService {
@@ -57,6 +59,13 @@ impl PanelService {
     }
     fn screenshot(&self) {
         let _ = self.tx.lock().unwrap().send(Cmd::Screenshot);
+    }
+    /// 插件运行状态 JSON（/proc 实扫聚合，见 status 模块）
+    fn plugin_status(&self) -> String {
+        crate::status::plugin_status_json()
+    }
+    fn plugin_stop(&self, id: String) {
+        let _ = self.tx.lock().unwrap().send(Cmd::PluginStop(id));
     }
     #[zbus(property)]
     fn visible(&self) -> bool {
@@ -96,6 +105,9 @@ fn call(conn: &zbus::blocking::Connection, cmd: Cmd) -> zbus::Result<()> {
         }
         Cmd::Screenshot => {
             let _: () = proxy.call("Screenshot", &())?;
+        }
+        Cmd::PluginStop(id) => {
+            let _: () = proxy.call("PluginStop", &(&id,))?;
         }
         // FadeIn 是定位线程回传守护进程的内部命令，CLI 不会发送
         Cmd::FadeIn(_) => {}

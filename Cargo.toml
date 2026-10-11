@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/yihu-core", "tools/yihu", "tools/autodark-agent", "tools/yihu-panel", "tools/mdworkbench", "tools/uic-poc", "plugins/ts-convert"]
+members = ["crates/yihu-core", "crates/yihu-plugin-sdk", "tools/yihu", "tools/autodark-agent", "tools/yihu-panel", "tools/mdworkbench", "tools/uic-poc", "plugins/ts-convert", "plugins/cronkit", "plugins/csvkit", "plugins/randgen", "plugins/passgen", "plugins/sqlfmt", "plugins/jsonkit", "plugins/devcodec"]
 exclude = ["tools/sysdash"]
 
 [workspace.package]

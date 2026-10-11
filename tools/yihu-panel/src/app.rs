@@ -375,6 +375,14 @@ pub fn run_daemon() {
                                 &deps.shot_async,
                             );
                         }
+                        Cmd::PluginStop(id) => {
+                            // 用户显式停止：kill_plugin 不计失败统计；
+                            // 常驻会话同样终止（radio 停止 = 音乐停，属主
+                            // 死亡检查随后清理播放进程）
+                            let stopped = deps.plugins.borrow_mut().kill_plugin(&id);
+                            deps.audit
+                                .record(&id, 0, "plugin.stop", "done", &format!("killed={stopped}"));
+                        }
                         Cmd::Show => summon(&deps, &slot),
                         Cmd::Hide => hide_panel(&deps, &slot),
                         Cmd::Quit => quit = true,
@@ -1596,7 +1604,7 @@ fn spawn_sticky_job(deps: &Deps, req: &crate::sessions::CapRequest, id: &str, cl
 
 /// Markdown 预览窗作业：消毒渲染 → 落盘 → 拉起 mdworkbench --view-html
 /// （WebKit 在 mdworkbench 进程，panel 因 gtk4 0.9 无法内嵌 WebKit）。
-fn spawn_mdview_job(deps: &Deps, req: &crate::sessions::CapRequest, title: String, text: String) {
+fn spawn_mdview_job(deps: &Deps, req: &crate::sessions::CapRequest, _title: String, text: String) {
     let slot = deps.cap_async.clone();
     let plugin = req.plugin.clone();
     let gen = req.gen;

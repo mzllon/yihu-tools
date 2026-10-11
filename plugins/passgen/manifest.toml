@@ -2,7 +2,7 @@ id = "passgen"
 name = "随机密码生成器"
 version = "0.2.0"
 api = "^1"
-entry = "passgen.py"
+entry = "passgen"
 icon = "dialog-password"
 
 [[triggers]]

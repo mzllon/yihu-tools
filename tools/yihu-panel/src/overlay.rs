@@ -186,9 +186,6 @@ fn close_all() {
     STATE.with(|s| *s.borrow_mut() = None);
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PxRect(i32, i32, i32, i32);
-
 /// 选区裁剪 + 分发完成动作（主线程；覆盖层先关，防重复触发）
 fn finish(action: Action) {
     let st = STATE.with(|s| s.borrow_mut().take());
@@ -305,7 +302,7 @@ fn draw(st: &OverlayState, idx: usize, cr: &gtk::cairo::Context, w: i32, h: i32)
         (mon.w as f64 * s) as i32,
         (mon.h as f64 * s) as i32,
     );
-    cr.save();
+    cr.save().ok();
     cr.scale(1.0 / s, 1.0 / s);
     match slice {
         Some(sub) => {
@@ -317,7 +314,7 @@ fn draw(st: &OverlayState, idx: usize, cr: &gtk::cairo::Context, w: i32, h: i32)
             let _ = cr.paint();
         }
     }
-    cr.restore();
+    let _ = cr.restore();
 
     // 2) 遮罩（选区与显示器的交集之外）+ 边框 + 提示
     let sel = *st.selection.borrow();

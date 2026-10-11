@@ -1,0 +1,8 @@
+[package]
+name = "sqlfmt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+yihu-plugin-sdk = { path = "../../crates/yihu-plugin-sdk" }
+serde_json = "1"

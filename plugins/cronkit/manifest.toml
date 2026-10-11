@@ -2,7 +2,7 @@ id = "cronkit"
 name = "cron 表达式"
 version = "0.1.0"
 api = "^1"
-entry = "cronkit.py"
+entry = "cronkit"
 icon = "view-refresh-symbolic"
 
 [[triggers]]

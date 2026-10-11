@@ -944,7 +944,10 @@ fn write_file(st: &State, path: &std::path::Path, md: &str) {
 
 fn export_docx(st: &Rc<State>, _win: &ApplicationWindow) {
     if !std::path::Path::new("/usr/bin/pandoc").exists() {
-        notify("未安装 pandoc（sudo apt install pandoc）");
+        notify(&format!(
+            "未安装 pandoc（{}）",
+            yihu_core::distro::install_hint(&["pandoc"])
+        ));
         return;
     }
     get_md(st, move |st2, md| {

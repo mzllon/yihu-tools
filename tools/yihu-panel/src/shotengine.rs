@@ -58,6 +58,7 @@ pub struct Rect {
 }
 
 impl Rect {
+    #[cfg(test)]
     pub fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
         Rect { x, y, w, h }
     }
@@ -170,7 +171,14 @@ pub fn qr_rgb_pixels(text: &str, scale: usize, quiet: usize) -> Result<(Vec<u8>,
 /// zbarimg 识别 PNG 中的二维码 → (ok, error, 文本)。未装 zbar-tools 给装包提示。
 pub fn decode_with_zbar(png_path: &std::path::Path) -> (bool, String, Option<String>) {
     if !std::path::Path::new("/usr/bin/zbarimg").exists() {
-        return (false, "未安装 zbar-tools（sudo apt install zbar-tools）".into(), None);
+        return (
+            false,
+            format!(
+                "未安装 zbar-tools（{}）",
+                yihu_core::distro::install_hint(&["zbar-tools"])
+            ),
+            None,
+        );
     }
     let out = std::process::Command::new("zbarimg")
         .args(["-q", "--raw"])

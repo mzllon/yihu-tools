@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod autodark;
 pub mod datactl;
+pub mod distro;
 pub mod mdrender;
 pub mod panel;
 pub mod paths;
