@@ -1,0 +1,11 @@
+id = "todo"
+name = "待办"
+version = "0.1.0"
+api = "^1"
+entry = "todo.py"
+icon = "view-list-symbolic"
+
+[[triggers]]
+keywords = ["todo", "待办", "任务"]
+
+permissions = []
