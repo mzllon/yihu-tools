@@ -54,6 +54,7 @@ enum Action {
     Copy,
     Pin,
     Save,
+    Decode,
 }
 
 /// 打开选区覆盖层（主线程调用；frame 由 shotengine 抓帧槽回主循环后传入）
@@ -146,6 +147,7 @@ pub fn show(frame: gtk::gdk_pixbuf::Pixbuf, audit: &Rc<yihu_core::audit::Audit>)
                     "Return" | "KP_Enter" => Some(Action::Copy),
                     "p" | "P" => Some(Action::Pin),
                     "s" | "S" => Some(Action::Save),
+                    "q" | "Q" => Some(Action::Decode),
                     _ => None,
                 };
                 if let Some(a) = action {
@@ -224,6 +226,43 @@ fn finish(action: Action) {
             st.audit
                 .record("host", 0, "shot.region", "done", &format!("贴图 {detail}"));
         }
+        Action::Decode => {
+            // 选区 → 临时 PNG → zbarimg 识别（线程）→ 文本进剪贴板（回主线程）
+            let tmp = std::env::temp_dir().join(format!(
+                "yihu-shot-decode-{}.png",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            if let Err(e) = pb.savev(&tmp, "png", &[]) {
+                notify(&format!("落盘失败：{e}"));
+                return;
+            }
+            st.audit
+                .record("host", 0, "shot.region", "done", &format!("识码 {detail}"));
+            std::thread::spawn(move || {
+                let (ok, error, data) = crate::shotengine::decode_with_zbar(&tmp);
+                if ok {
+                    if let Some(text) = data {
+                        // 剪贴板必须在主线程；文本（Send）投回主循环
+                        glib::MainContext::default().invoke(move || {
+                            if let Some(d) = gdk::Display::default() {
+                                d.clipboard().set_text(&text);
+                            }
+                            let preview: String = text.chars().take(60).collect();
+                            let _ = std::process::Command::new("notify-send")
+                                .args(["--app-name=一呼", &format!("识别到：{preview}")])
+                                .spawn();
+                        });
+                    }
+                } else {
+                    let _ = std::process::Command::new("notify-send")
+                        .args(["--app-name=一呼", &error])
+                        .spawn();
+                }
+            });
+        }
         Action::Save => match shotengine::save_pixbuf(&pb) {
             Ok(path) => {
                 st.audit.record(
@@ -285,7 +324,7 @@ fn draw(st: &OverlayState, idx: usize, cr: &gtk::cairo::Context, w: i32, h: i32)
     let Some(r) = sel else {
         let _ = cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
         let _ = cr.paint();
-        draw_center_hint(cr, w, h, "拖动框选 · Enter 复制 · P 贴图 · S 保存 · Esc 取消");
+        draw_center_hint(cr, w, h, "拖动框选 · Enter 复制 · P 贴图 · S 保存 · Q 识码 · Esc 取消");
         return;
     };
 

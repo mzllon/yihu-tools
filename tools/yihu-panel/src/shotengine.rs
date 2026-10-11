@@ -17,8 +17,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gtk::gdk;
+use gtk::gdk::prelude::{TextureExt as _, TextureExtManual as _};
 use gtk::gdk_pixbuf::prelude::*;
 use gtk::gdk_pixbuf::Pixbuf;
+use gtk::glib;
 
 /// 抓帧结果槽消息：Frame（PNG 字节）→ 主循环解码开覆盖层（Pixbuf 非 Send，
 /// 跨线程只传字节）；Failed → 通知
@@ -135,6 +138,99 @@ pub fn save_dir() -> PathBuf {
     }
 }
 
+// ---- 二维码 ----------------------------------------------------------------
+
+/// 文本 → 二维码 RGB 像素（模块放大 scale 倍 + quiet 静区）。
+/// qrcode 纯 Rust 编码，零系统依赖；返回 (RGB 字节, 宽, 高)。
+pub fn qr_rgb_pixels(text: &str, scale: usize, quiet: usize) -> Result<(Vec<u8>, i32, i32), String> {
+    use qrcode::QrCode;
+    let code = QrCode::new(text.as_bytes()).map_err(|e| format!("内容过长无法编码：{e}"))?;
+    let modules = code.width();
+    let colors = code.to_colors();
+    let total = (modules + quiet * 2) * scale;
+    let mut data = vec![255u8; total * total * 3];
+    for my in 0..modules {
+        for mx in 0..modules {
+            if colors[my * modules + mx] == qrcode::Color::Light {
+                continue; // 白模块
+            }
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let px = (quiet + mx) * scale + dx;
+                    let py = (quiet + my) * scale + dy;
+                    let off = (py * total + px) * 3;
+                    data[off..off + 3].copy_from_slice(&[0, 0, 0]);
+                }
+            }
+        }
+    }
+    Ok((data, total as i32, total as i32))
+}
+
+/// zbarimg 识别 PNG 中的二维码 → (ok, error, 文本)。未装 zbar-tools 给装包提示。
+pub fn decode_with_zbar(png_path: &std::path::Path) -> (bool, String, Option<String>) {
+    if !std::path::Path::new("/usr/bin/zbarimg").exists() {
+        return (false, "未安装 zbar-tools（sudo apt install zbar-tools）".into(), None);
+    }
+    let out = std::process::Command::new("zbarimg")
+        .args(["-q", "--raw"])
+        .arg(png_path)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if text.is_empty() {
+                (false, "未识别到二维码".into(), None)
+            } else {
+                (true, String::new(), Some(text))
+            }
+        }
+        Ok(_) => (false, "未识别到二维码".into(), None),
+        Err(e) => (false, format!("zbarimg 执行失败：{e}"), None),
+    }
+}
+
+/// 纹理 → 临时 PNG 文件（二维码识别等需要落盘的场景）。
+/// download = BGRA8 预乘 → Pixbuf RGBA → savev。
+pub fn texture_to_png(tex: &gdk::Texture) -> Result<PathBuf, String> {
+    let w = tex.width();
+    let h = tex.height();
+    let stride = (w * 4) as usize;
+    let mut bytes = vec![0u8; stride * h as usize];
+    tex.download(&mut bytes, stride);
+    let unpre = |c: u32, a: u32| -> u32 {
+        if a == 0 {
+            0
+        } else {
+            ((c * 255 + a / 2) / a).min(255)
+        }
+    };
+    let mut data = Vec::with_capacity(stride * h as usize);
+    for px in bytes.chunks_exact(4) {
+        let (b, g, r, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
+        data.extend_from_slice(&[unpre(r, a) as u8, unpre(g, a) as u8, unpre(b, a) as u8, a as u8]);
+    }
+    let pb = gtk::gdk_pixbuf::Pixbuf::from_bytes(
+        &glib::Bytes::from_owned(data),
+        gtk::gdk_pixbuf::Colorspace::Rgb,
+        true,
+        8,
+        w,
+        h,
+        stride as i32,
+    );
+    let path = std::env::temp_dir().join(format!(
+        "yihu-tex-{}.png",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    pb.savev(&path, "png", &[])
+        .map_err(|e| format!("纹理落盘失败：{e}"))?;
+    Ok(path)
+}
+
 /// 保存 Pixbuf 到截图目录，返回落盘路径
 pub fn save_pixbuf(pb: &Pixbuf) -> Result<PathBuf, String> {
     let dir = save_dir();
@@ -176,6 +272,18 @@ mod tests {
         assert!(crop_pixels(100, 100, Rect::new(0, 0, 0, 0), 1.0).is_none());
         // 非法缩放因子按 1 处理
         assert_eq!(crop_pixels(100, 100, Rect::new(1, 1, 5, 5), 0.0).unwrap(), (1, 1, 5, 5));
+    }
+
+    #[test]
+    fn qr_pixels_shape_and_corner() {
+        // 任意文本：尺寸 = (模块数 + 静区×2) × scale，四角必为白（静区）
+        let (data, w, h) = qr_rgb_pixels("https://example.com", 8, 4).unwrap();
+        assert_eq!(w, h);
+        assert_eq!(data.len(), (w * h * 3) as usize);
+        let idx = ((0 * w + 0) * 3) as usize;
+        assert_eq!(&data[idx..idx + 3], &[255, 255, 255]);
+        // 内容里必有黑模块
+        assert!(data.chunks_exact(3).any(|p| p == [0, 0, 0]));
     }
 
     #[test]

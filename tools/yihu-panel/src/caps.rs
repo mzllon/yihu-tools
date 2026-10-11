@@ -61,6 +61,12 @@ pub enum CapAction {
     AudioStop,
     /// 经宿主调节当前播放流音量（0-100，pactl 单流）
     AudioVolume { pct: u32 },
+    /// 经宿主生成二维码（qrcode 纯 Rust；生成后宿主钉出 + 复制）
+    QrGenerate { text: String },
+    /// 经宿主识别二维码（剪贴板图片 → zbarimg；未装 zbar-tools 报装包提示）
+    QrDecode,
+    /// 经宿主渲染 Markdown（pulldown-cmark；mode=preview 浏览器预览 / html 回传）
+    MdRender { mode: String, text: String },
 }
 
 /// 从 URL 提取 host[:port]（port 缺省按 scheme 补 443/80）。
@@ -293,6 +299,42 @@ pub fn evaluate(
             }
             Ok(CapAction::AudioVolume { pct: pct as u32 })
         }
+        perms::QR_GENERATE => {
+            if !perms::has_plain(declared_raw, capability) {
+                return Err(format!("manifest 未声明能力 {capability}"));
+            }
+            let text = get("text")?;
+            if text.is_empty() || text.len() > 2048 {
+                return Err(format!("text 长度非法（1-2048 字节）：{}", text.len()));
+            }
+            if text.chars().any(|c| c.is_control()) {
+                return Err("text 含控制字符".into());
+            }
+            Ok(CapAction::QrGenerate { text: text.to_string() })
+        }
+        perms::QR_DECODE => {
+            if !perms::has_plain(declared_raw, capability) {
+                return Err(format!("manifest 未声明能力 {capability}"));
+            }
+            Ok(CapAction::QrDecode)
+        }
+        perms::MD_RENDER => {
+            if !perms::has_plain(declared_raw, capability) {
+                return Err(format!("manifest 未声明能力 {capability}"));
+            }
+            let mode = get("mode")?;
+            if mode != "preview" && mode != "html" {
+                return Err(format!("mode {mode:?} 非法（preview/html）"));
+            }
+            let text = get("text")?;
+            if text.is_empty() || text.len() > 1024 * 1024 {
+                return Err(format!("text 长度非法（1-1MiB 字节）：{}", text.len()));
+            }
+            Ok(CapAction::MdRender {
+                mode: mode.to_string(),
+                text: text.to_string(),
+            })
+        }
         perms::SETTINGS_WRITE => {
             let schema = get("schema")?;
             let key = get("key")?;
@@ -515,6 +557,29 @@ mod tests {
         assert!(matches!(a, CapAction::AudioVolume { pct: 80 }));
         let a = evaluate(&d, perms::AUDIO_STOP, &json!({})).unwrap();
         assert!(matches!(a, CapAction::AudioStop));
+    }
+
+    #[test]
+    fn qr_md_caps_validate_params() {
+        let d = declared(&["qr.generate", "qr.decode", "md.render"]);
+        let a = evaluate(&d, perms::QR_GENERATE, &json!({"text": "hello"})).unwrap();
+        assert!(matches!(a, CapAction::QrGenerate { .. }));
+        // 超长/空/控制字符拒绝
+        assert!(evaluate(&d, perms::QR_GENERATE, &json!({"text": ""})).is_err());
+        assert!(evaluate(&d, perms::QR_GENERATE, &json!({"text": "x".repeat(2049)})).is_err());
+        assert!(evaluate(&d, perms::QR_GENERATE, &json!({"text": "a\nb"})).is_err());
+        let a = evaluate(&d, perms::QR_DECODE, &json!({})).unwrap();
+        assert!(matches!(a, CapAction::QrDecode));
+        // 未声明拒绝
+        let e = evaluate(&plain(&[]), perms::QR_DECODE, &json!({})).unwrap_err();
+        assert!(e.contains("未声明"), "{e}");
+        // md.render mode 白名单 + 长度上限
+        assert!(matches!(
+            evaluate(&d, perms::MD_RENDER, &json!({"mode": "preview", "text": "# hi"})).unwrap(),
+            CapAction::MdRender { .. }
+        ));
+        assert!(evaluate(&d, perms::MD_RENDER, &json!({"mode": "post", "text": "x"})).is_err());
+        assert!(evaluate(&d, perms::MD_RENDER, &json!({"mode": "html", "text": ""})).is_err());
     }
 
     #[test]

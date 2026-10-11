@@ -48,6 +48,12 @@ pub const AUDIO_PLAY: &str = "audio.play";
 pub const AUDIO_STOP: &str = "audio.stop";
 /// 经宿主调节当前播放流音量（0–100，pactl 单流，不影响系统音量）
 pub const AUDIO_VOLUME: &str = "audio.volume";
+/// 经宿主生成二维码 PNG（qrcode 纯 Rust 编码；生成后宿主钉出+复制）
+pub const QR_GENERATE: &str = "qr.generate";
+/// 经宿主识别剪贴板/选区里的二维码（zbarimg；未装 zbar-tools 时报装包提示）
+pub const QR_DECODE: &str = "qr.decode";
+/// 经宿主渲染 Markdown（pulldown-cmark：浏览器预览 / 转 HTML）
+pub const MD_RENDER: &str = "md.render";
 
 /// v2 全部合法能力名（无参能力 + 带参能力的基名）
 pub const KNOWN: &[&str] = &[
@@ -66,6 +72,9 @@ pub const KNOWN: &[&str] = &[
     AUDIO_PLAY,
     AUDIO_STOP,
     AUDIO_VOLUME,
+    QR_GENERATE,
+    QR_DECODE,
+    MD_RENDER,
 ];
 
 /// 允许带 @参数的能力基名
@@ -221,6 +230,9 @@ pub fn label(declared: &str) -> String {
             (AUDIO_PLAY, Some(host)) => format!("播放音频流 {host}"),
             (AUDIO_STOP, _) => "停止音频播放".into(),
             (AUDIO_VOLUME, _) => "调节播放音量".into(),
+            (QR_GENERATE, _) => "生成二维码（qrcode）".into(),
+            (QR_DECODE, _) => "识别二维码（zbar）".into(),
+            (MD_RENDER, _) => "渲染 Markdown".into(),
             _ => d.capability,
         },
         Err(_) => declared.to_string(),
@@ -255,6 +267,11 @@ mod tests {
         .unwrap();
         // 无参 audio 能力合法
         validate(&s(&[AUDIO_STOP, AUDIO_VOLUME])).unwrap();
+        // 无参 qr/md 能力合法
+        validate(&s(&[QR_GENERATE, QR_DECODE, MD_RENDER])).unwrap();
+        // 无参能力带参数非法
+        assert!(validate(&s(&["qr.generate@x"])).is_err());
+        assert!(validate(&s(&["md.render@x"])).is_err());
     }
 
     #[test]
@@ -326,6 +343,9 @@ mod tests {
         assert_eq!(label("audio.play@ls.qingting.fm"), "播放音频流 ls.qingting.fm");
         assert_eq!(label("audio.stop"), "停止音频播放");
         assert_eq!(label("audio.volume"), "调节播放音量");
+        assert_eq!(label("qr.generate"), "生成二维码（qrcode）");
+        assert_eq!(label("qr.decode"), "识别二维码（zbar）");
+        assert_eq!(label("md.render"), "渲染 Markdown");
         assert_eq!(label("clipboard.write"), "写剪贴板（经宿主）");
         assert_eq!(label("clipboard.read"), "读剪贴板（经宿主）");
         assert_eq!(label("garbage"), "garbage");

@@ -1,0 +1,11 @@
+id = "csvkit"
+name = "CSV ⇄ JSON"
+version = "0.1.0"
+api = "^1"
+entry = "csvkit.py"
+icon = "x-office-spreadsheet"
+
+[[triggers]]
+keywords = ["csv", "csvjson", "转换"]
+
+permissions = []

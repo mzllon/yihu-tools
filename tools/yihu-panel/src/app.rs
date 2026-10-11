@@ -256,6 +256,29 @@ pub fn run_daemon() {
                                 }
                             }
                         }
+                        // 二维码生成：钉出贴图窗 + 写剪贴板（宿主自有 UI 副作用）
+                        if out.capability == "qr.generate" && !out.path.is_empty() {
+                            match std::fs::read(&out.path)
+                                .map_err(|e| e.to_string())
+                                .and_then(|b| crate::shotengine::pixbuf_from_png(&b))
+                            {
+                                Ok(pb) => {
+                                    crate::pin::pin_pixbuf(pb.clone(), &deps.audit);
+                                    if let Some(display) = gdk::Display::default() {
+                                        display
+                                            .clipboard()
+                                            .set_texture(&gdk::Texture::for_pixbuf(&pb));
+                                    }
+                                    let _ = spawn_detached_checked(
+                                        "notify-send",
+                                        &["--app-name=一呼", "二维码已生成：钉出 + 已复制"],
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("yihu-panel: 二维码钉出失败：{e}");
+                                }
+                            }
+                        }
                         if out.notify {
                             let summary = if out.clipboard {
                                 "截图已复制到剪贴板"
@@ -963,6 +986,97 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
             });
             return;
         }
+        Ok(crate::caps::CapAction::QrGenerate { text }) => {
+            deps.audit.record(
+                &req.plugin,
+                req.gen,
+                &req.capability,
+                "grant",
+                &format!("{} 字符", text.len()),
+            );
+            spawn_qrgen_job(deps, &req, text);
+            return;
+        }
+        Ok(crate::caps::CapAction::QrDecode) => {
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", "剪贴板识别");
+            // 剪贴板纹理主线程异步读 → 落盘 → 线程跑 zbarimg → 回包
+            let Some(display) = gdk::Display::default() else {
+                deps.plugins.borrow_mut().respond_gen(
+                    &req.plugin,
+                    req.gen,
+                    req.request_id,
+                    false,
+                    "无默认显示",
+                    None,
+                );
+                deps.audit
+                    .record(&req.plugin, req.gen, &req.capability, "error", "无默认显示");
+                return;
+            };
+            let slot = deps.cap_async.clone();
+            let plugin = req.plugin.clone();
+            let gen = req.gen;
+            let request_id = req.request_id;
+            display
+                .clipboard()
+                .read_texture_async(gio::Cancellable::NONE, move |res| {
+                    let png = match res {
+                        Ok(Some(tex)) => match crate::shotengine::texture_to_png(&tex) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                slot.lock().unwrap().push(CapOutcome {
+                                    plugin, gen, request_id,
+                                    capability: "qr.decode".into(),
+                                    ok: false, error: e, path: String::new(),
+                                    png: None, clipboard: false, data: None, notify: false,
+                                });
+                                return;
+                            }
+                        },
+                        Ok(None) => {
+                            slot.lock().unwrap().push(CapOutcome {
+                                plugin, gen, request_id,
+                                capability: "qr.decode".into(),
+                                ok: false, error: "剪贴板里没有图片".into(), path: String::new(),
+                                png: None, clipboard: false, data: None, notify: false,
+                            });
+                            return;
+                        }
+                        Err(e) => {
+                            slot.lock().unwrap().push(CapOutcome {
+                                plugin, gen, request_id,
+                                capability: "qr.decode".into(),
+                                ok: false, error: format!("读取剪贴板失败：{e}"), path: String::new(),
+                                png: None, clipboard: false, data: None, notify: false,
+                            });
+                            return;
+                        }
+                    };
+                    std::thread::spawn(move || {
+                        let (ok, error, data) = crate::shotengine::decode_with_zbar(&png);
+                        let data = data.map(|t| serde_json::to_string(&t).unwrap_or_default());
+                        slot.lock().unwrap().push(CapOutcome {
+                            plugin, gen, request_id,
+                            capability: "qr.decode".into(),
+                            ok, error, path: String::new(),
+                            png: None, clipboard: false, data, notify: false,
+                        });
+                    });
+                });
+            return;
+        }
+        Ok(crate::caps::CapAction::MdRender { mode, text }) => {
+            deps.audit.record(
+                &req.plugin,
+                req.gen,
+                &req.capability,
+                "grant",
+                &format!("{mode} {} 字符", text.len()),
+            );
+            spawn_mdrender_job(deps, &req, mode, text);
+            return;
+        }
         // 读剪贴板：gdk 异步读（Wayland 下是到数据源的 IPC 往返，同步版
         // 会阻塞主循环——硬性规则 #1）。完成回调推 cap_async 槽走统一泵。
         Ok(crate::caps::CapAction::ClipboardRead) => {
@@ -1363,6 +1477,108 @@ fn spawn_audio_job(
     });
 }
 
+/// 二维码生成作业：qrcode 纯 Rust 编码 → PNG 落盘 → 回包带 path；
+/// 钉出/复制副作用在泵里做（主线程 GTK）。
+fn spawn_qrgen_job(deps: &Deps, req: &crate::sessions::CapRequest, text: String) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    std::thread::spawn(move || {
+        let (ok, error, path) = match qr_encode_png(&text) {
+            Ok(p) => (true, String::new(), p),
+            Err(e) => (false, e, String::new()),
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            capability: "qr.generate".into(),
+            ok,
+            error,
+            path,
+            png: None,
+            clipboard: false,
+            data: None,
+            notify: false,
+        });
+    });
+}
+
+fn qr_encode_png(text: &str) -> Result<String, String> {
+    let (data, w, h) = crate::shotengine::qr_rgb_pixels(text, 8, 4)?;
+    let pb = gtk::gdk_pixbuf::Pixbuf::from_bytes(
+        &glib::Bytes::from_owned(data),
+        gtk::gdk_pixbuf::Colorspace::Rgb,
+        false,
+        8,
+        w,
+        h,
+        w * 3,
+    );
+    let path = std::env::temp_dir().join(format!(
+        "yihu-qr-{}.png",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    pb.savev(&path, "png", &[])
+        .map_err(|e| format!("二维码落盘失败：{e}"))?;
+    Ok(path.display().to_string())
+}
+
+/// Markdown 渲染作业：pulldown-cmark；preview = 写预览页 + gio open，
+/// html = HTML 文本回传（data）。
+fn spawn_mdrender_job(
+    deps: &Deps,
+    req: &crate::sessions::CapRequest,
+    mode: String,
+    text: String,
+) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    std::thread::spawn(move || {
+        let html = crate::mdrender::render_html(&text);
+        let result = if mode == "html" {
+            (
+                true,
+                String::new(),
+                Some(serde_json::to_string(&html).unwrap_or_default()),
+            )
+        } else {
+            match crate::mdrender::write_preview(&html) {
+                Ok(path) => {
+                    if let Err(e) =
+                        spawn_detached_checked("gio", &["open", &path.display().to_string()])
+                    {
+                        (false, format!("打开浏览器失败：{e}"), None)
+                    } else {
+                        (true, String::new(), None)
+                    }
+                }
+                Err(e) => (false, format!("写预览文件失败：{e}"), None),
+            }
+        };
+        let (ok, error, data) = result;
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            capability: "md.render".into(),
+            ok,
+            error,
+            path: String::new(),
+            png: None,
+            clipboard: false,
+            data,
+            notify: false,
+        });
+    });
+}
+
 /// 截屏后台作业：portal 调用（可能等用户框选数分钟）→ 结果入槽，
 /// 常驻泵回主循环回包。审批（grant 审计）已在 handle_capability 记录。
 fn spawn_screenshot_job(deps: &Deps, req: &crate::sessions::CapRequest, mode: &str, clipboard: bool) {
@@ -1437,6 +1653,10 @@ fn execute_capability(action: crate::caps::CapAction) -> Result<(), String> {
         crate::caps::CapAction::AudioPlay { .. } => Ok(()),
         crate::caps::CapAction::AudioStop => Ok(()),
         crate::caps::CapAction::AudioVolume { .. } => Ok(()),
+        // 二维码/Markdown 三能力：全部走异步作业（handle_capability 拦截）
+        crate::caps::CapAction::QrGenerate { .. } => Ok(()),
+        crate::caps::CapAction::QrDecode => Ok(()),
+        crate::caps::CapAction::MdRender { .. } => Ok(()),
     }
 }
 

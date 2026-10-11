@@ -7,6 +7,7 @@
 mod app;
 mod caps;
 mod calc;
+mod mdrender;
 mod overlay;
 mod pinyin_index;
 mod pin;

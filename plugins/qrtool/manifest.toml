@@ -1,0 +1,13 @@
+id = "qrtool"
+name = "二维码"
+version = "0.1.0"
+api = "^1"
+entry = "qrtool.py"
+icon = "applications-graphics"
+
+[[triggers]]
+keywords = ["qr", "qrcode", "二维码"]
+
+# 生成（qrcode 纯 Rust 编码 → 宿主钉出+复制）/ 识别（剪贴板图片 → zbar；
+# 未装 zbar-tools 宿主会给装包提示）/ 识别结果回写剪贴板
+permissions = ["qr.generate", "qr.decode", "clipboard.write"]
