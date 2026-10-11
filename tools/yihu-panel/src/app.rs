@@ -62,6 +62,9 @@ struct Deps {
     sys_plugins: Rc<RefCell<std::collections::HashSet<String>>>,
     /// 异步能力结果槽（截屏等：后台线程完成后经此回主循环回包）
     cap_async: Arc<Mutex<Vec<CapOutcome>>>,
+    /// 电台播放执行端（宿主代播：gst-play 子进程 + 清单镜像；M5 电台插件化）。
+    /// Arc 跨线程共享给能力作业线程；Drop 停播，守护进程退出零孤儿。
+    player: Arc<crate::player::RadioPlayer>,
 }
 
 /// 后台执行的能力结果（截屏/网络/settings/fs 等）：由常驻泵回主循环回包/审计/副作用
@@ -145,6 +148,7 @@ pub fn run_daemon() {
         let audit = Rc::new(yihu_core::audit::Audit::open(yihu_core::audit::audit_path()));
         let app_refresh: Arc<Mutex<Option<Vec<PanelEntry>>>> = Arc::new(Mutex::new(None));
         let cap_async: Arc<Mutex<Vec<CapOutcome>>> = Arc::new(Mutex::new(Vec::new()));
+        let player = Arc::new(crate::player::RadioPlayer::new());
         let deps = Rc::new(Deps {
             app: app.clone(),
             plugins,
@@ -163,6 +167,7 @@ pub fn run_daemon() {
             app_refresh: app_refresh.clone(),
             sys_plugins: sys_plugins.clone(),
             cap_async: cap_async.clone(),
+            player,
         });
 
         // —— 应用列表热刷新（AppInfoMonitor，穿插小项）——
@@ -284,9 +289,18 @@ pub fn run_daemon() {
                     }
                 }
                 // 常驻 provider 空闲清扫只在隐藏态跑（可见态 keystroke
-                // 持续刷新 last_used，清扫无意义且会打断正在交互的插件）
-                if !deps.visible.load(Ordering::Relaxed) {
+                // 持续刷新 last_used，清扫无意义且会打断正在交互的插件）；
+                // 电台播放期间整体跳过——属主会话空闲自退会连音乐一起停掉
+                if !deps.visible.load(Ordering::Relaxed) && !deps.player.is_playing() {
                     let _ = deps.plugins.borrow_mut().sweep_idle();
+                }
+                // 播放属主会话已死（崩溃/禁用重启）→ 停播，不留孤儿音频
+                if let Some(owner) = deps.player.owner() {
+                    let alive = deps.plugins.borrow().has_session(&owner);
+                    if !alive {
+                        deps.audit.record(&owner, 0, "audio.play", "stop", "属主会话已死亡");
+                        deps.player.stop();
+                    }
                 }
                 while let Ok(cmd) = rx.try_recv() {
                     match cmd {
@@ -903,6 +917,43 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
             spawn_fsread_job(deps, &req, &path);
             return;
         }
+        // —— 电台三能力（M5 电台插件化）：全部宿主代执行。play 阻塞可达
+        // 5s（等首份清单落地），必须离主循环线程（硬性规则 #1）。
+        Ok(crate::caps::CapAction::AudioPlay { url }) => {
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", &url);
+            spawn_audioplay_job(deps, &req, url);
+            return;
+        }
+        Ok(crate::caps::CapAction::AudioStop) => {
+            deps.audit
+                .record(&req.plugin, req.gen, &req.capability, "grant", "");
+            spawn_audio_job(deps, &req, "audio.stop", {
+                let player = deps.player.clone();
+                move || {
+                    player.stop();
+                    Ok(())
+                }
+            });
+            return;
+        }
+        Ok(crate::caps::CapAction::AudioVolume { pct }) => {
+            deps.audit.record(
+                &req.plugin,
+                req.gen,
+                &req.capability,
+                "grant",
+                &format!("{pct}%"),
+            );
+            spawn_audio_job(deps, &req, "audio.volume", {
+                let player = deps.player.clone();
+                move || {
+                    player.set_volume(pct);
+                    Ok(())
+                }
+            });
+            return;
+        }
         // 读剪贴板：gdk 异步读（Wayland 下是到数据源的 IPC 往返，同步版
         // 会阻塞主循环——硬性规则 #1）。完成回调推 cap_async 槽走统一泵。
         Ok(crate::caps::CapAction::ClipboardRead) => {
@@ -1260,6 +1311,49 @@ fn spawn_fsread_job(deps: &Deps, req: &crate::sessions::CapRequest, path: &str) 
     });
 }
 
+/// 电台播放作业：play 阻塞可达 5s（等首份清单），只能后台线程；
+/// 完成后入槽由常驻泵回包（属主信息由 player 自行记录）。
+fn spawn_audioplay_job(deps: &Deps, req: &crate::sessions::CapRequest, url: String) {
+    spawn_audio_job(deps, req, "audio.play", {
+        let player = deps.player.clone();
+        let owner = req.plugin.clone();
+        move || player.play(&url, &owner)
+    });
+}
+
+/// 电台 stop/volume 通用作业：闭包在后台线程执行，结果入槽回包。
+fn spawn_audio_job(
+    deps: &Deps,
+    req: &crate::sessions::CapRequest,
+    capability: &str,
+    job: impl FnOnce() -> Result<(), String> + Send + 'static,
+) {
+    let slot = deps.cap_async.clone();
+    let plugin = req.plugin.clone();
+    let gen = req.gen;
+    let request_id = req.request_id;
+    let capability = capability.to_string();
+    std::thread::spawn(move || {
+        let (ok, error) = match job() {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, e),
+        };
+        slot.lock().unwrap().push(CapOutcome {
+            plugin,
+            gen,
+            request_id,
+            capability,
+            ok,
+            error,
+            path: String::new(),
+            png: None,
+            clipboard: false,
+            data: None,
+            notify: false,
+        });
+    });
+}
+
 /// 截屏后台作业：portal 调用（可能等用户框选数分钟）→ 结果入槽，
 /// 常驻泵回主循环回包。审批（grant 审计）已在 handle_capability 记录。
 fn spawn_screenshot_job(deps: &Deps, req: &crate::sessions::CapRequest, mode: &str, clipboard: bool) {
@@ -1330,6 +1424,10 @@ fn execute_capability(action: crate::caps::CapAction) -> Result<(), String> {
         crate::caps::CapAction::SettingsRead { .. } => Ok(()),
         crate::caps::CapAction::FsWrite { .. } => Ok(()),
         crate::caps::CapAction::FsRead { .. } => Ok(()),
+        // 电台播放三能力：全部走异步作业（handle_capability 拦截），同步路径不可达
+        crate::caps::CapAction::AudioPlay { .. } => Ok(()),
+        crate::caps::CapAction::AudioStop => Ok(()),
+        crate::caps::CapAction::AudioVolume { .. } => Ok(()),
     }
 }
 
@@ -1804,7 +1902,6 @@ fn build_cap_grid(deps: &Rc<Deps>, slot: &Slot) -> gtk::FlowBox {
     const TILES: &[(&str, &str, &str)] = &[
         ("theme:dark", "深色", "weather-clear-night-symbolic"),
         ("theme:light", "浅色", "weather-clear-symbolic"),
-        ("page:radio", "广播", "applications-multimedia-symbolic"),
         ("page:autodark", "主题页", "night-light-symbolic"),
         ("sys:screenshot", "截图", "camera-photo-symbolic"),
         ("sys:lock", "锁屏", "system-lock-screen-symbolic"),

@@ -41,6 +41,13 @@ pub const FS_WRITE: &str = "fs.write";
 /// 经宿主读文件（声明路径 glob，UTF-8 文本；canonicalize 复检防符号链接
 /// 逃逸——M5 v2 扩容）
 pub const FS_READ: &str = "fs.read";
+/// 经宿主播放音频流（声明流 host 白名单，M5 电台插件化；宿主侧
+/// gst-play 子进程 + 清单镜像，见 panel/player.rs）
+pub const AUDIO_PLAY: &str = "audio.play";
+/// 经宿主停止当前音频播放（宿主级单流语义）
+pub const AUDIO_STOP: &str = "audio.stop";
+/// 经宿主调节当前播放流音量（0–100，pactl 单流，不影响系统音量）
+pub const AUDIO_VOLUME: &str = "audio.volume";
 
 /// v2 全部合法能力名（无参能力 + 带参能力的基名）
 pub const KNOWN: &[&str] = &[
@@ -56,10 +63,20 @@ pub const KNOWN: &[&str] = &[
     SETTINGS_READ,
     FS_WRITE,
     FS_READ,
+    AUDIO_PLAY,
+    AUDIO_STOP,
+    AUDIO_VOLUME,
 ];
 
 /// 允许带 @参数的能力基名
-pub const PARAMETRIC: &[&str] = &[NETWORK_FETCH, SETTINGS_WRITE, SETTINGS_READ, FS_WRITE, FS_READ];
+pub const PARAMETRIC: &[&str] = &[
+    NETWORK_FETCH,
+    SETTINGS_WRITE,
+    SETTINGS_READ,
+    FS_WRITE,
+    FS_READ,
+    AUDIO_PLAY,
+];
 
 /// 一条声明：基名 + 参数（无参能力 param 为 None）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +123,7 @@ fn validate_param(cap: &str, p: &str) -> Result<(), String> {
         return Err(format!("{cap} 参数长度非法"));
     }
     match cap {
-        NETWORK_FETCH => {
+        NETWORK_FETCH | AUDIO_PLAY => {
             // host[:port]；仅字母数字.-_ 与可选端口
             if p.starts_with('.') || p.ends_with('.') || p.contains("..") {
                 return Err(format!("host 非法：{p}"));
@@ -201,6 +218,9 @@ pub fn label(declared: &str) -> String {
             (SETTINGS_READ, Some(schema)) => format!("读系统设置 {schema}"),
             (FS_WRITE, Some(path)) => format!("写文件 {path}"),
             (FS_READ, Some(path)) => format!("读文件 {path}"),
+            (AUDIO_PLAY, Some(host)) => format!("播放音频流 {host}"),
+            (AUDIO_STOP, _) => "停止音频播放".into(),
+            (AUDIO_VOLUME, _) => "调节播放音量".into(),
             _ => d.capability,
         },
         Err(_) => declared.to_string(),
@@ -230,8 +250,11 @@ mod tests {
             "fs.write@~/.config/Code*/settings.json",
             "fs.write@/opt/share/**/*.conf",
             "fs.read@~/.config/**/*.json",
+            "audio.play@ls.qingting.fm",
         ]))
         .unwrap();
+        // 无参 audio 能力合法
+        validate(&s(&[AUDIO_STOP, AUDIO_VOLUME])).unwrap();
     }
 
     #[test]
@@ -244,15 +267,19 @@ mod tests {
             // 无参能力带参数
             "clipboard.write@x",
             "clipboard.read@x",
+            "audio.stop@x",
+            "audio.volume@x",
             // 带参能力缺参数
             "network.fetch",
             "fs.write",
             "fs.read",
             "settings.write",
+            "audio.play",
             // 参数形状非法
             "network.fetch@..",
             "network.fetch@host:99999",
             "network.fetch@host:notaport",
+            "audio.play@..",
             "settings.write@org.gnome..x",
             "settings.write@schema space",
             "fs.write@relative/path",
@@ -296,6 +323,9 @@ mod tests {
             label("settings.write@org.gnome.desktop.interface"),
             "改系统设置 org.gnome.desktop.interface"
         );
+        assert_eq!(label("audio.play@ls.qingting.fm"), "播放音频流 ls.qingting.fm");
+        assert_eq!(label("audio.stop"), "停止音频播放");
+        assert_eq!(label("audio.volume"), "调节播放音量");
         assert_eq!(label("clipboard.write"), "写剪贴板（经宿主）");
         assert_eq!(label("clipboard.read"), "读剪贴板（经宿主）");
         assert_eq!(label("garbage"), "garbage");

@@ -357,6 +357,11 @@ impl PluginMgr {
         }
     }
 
+    /// 指定插件是否还有存活会话（播放属主死亡检查用）
+    pub fn has_session(&self, id: &str) -> bool {
+        self.sessions.iter().any(|s| s.id == id)
+    }
+
     /// 收起时调用：进程组级 SIGKILL 杀灭非常驻会话；常驻会话保留
     /// （空闲自退交由 sweep_idle），仅清结果与上下文。
     pub fn kill_all(&mut self) {
@@ -790,6 +795,12 @@ for line in sys.stdin:
             send({"type": "capability_request", "id": rid,
                   "capability": "clipboard.read", "params": {}})
             continue
+        if text == "audiostop":
+            rid = 8000 + m["id"]
+            pending[rid] = m["id"]
+            send({"type": "capability_request", "id": rid,
+                  "capability": "audio.stop", "params": {}})
+            continue
         rid = 1000 + m["id"]
         if text == "shot":
             cap = "screenshot.take"
@@ -830,7 +841,7 @@ for line in sys.stdin:
             (
                 "fake-plugin",
                 "假插件",
-                "[\"clipboard.write\", \"clipboard.read\", \"selected_files.read\", \"settings.write@org.gnome.desktop.interface\", \"fs.write@~/.yihu-e2e-test/**/*.json\", \"fs.read@~/.yihu-e2e-test/**/*.json\", \"settings.read@org.gnome.settings-daemon.plugins.media-keys\"]",
+                "[\"clipboard.write\", \"clipboard.read\", \"selected_files.read\", \"settings.write@org.gnome.desktop.interface\", \"fs.write@~/.yihu-e2e-test/**/*.json\", \"fs.read@~/.yihu-e2e-test/**/*.json\", \"settings.read@org.gnome.settings-daemon.plugins.media-keys\", \"audio.stop\"]",
                 false,
             ),
             ("plain-plugin", "素插件", "[]", true),
@@ -1075,6 +1086,20 @@ for line in sys.stdin:
             m.latest_rows()
                 .iter()
                 .any(|r| r.title.contains("剪贴板文本"))
+        });
+
+        // ③g audio.stop：声明即授权（M5 电台插件化能力面）；宿主无播放时
+        // 停止也是 ok 响应（幂等安全）
+        mgr.broadcast("audiostop");
+        wait_for(&mut mgr, &mut acc, Duration::from_secs(10), |_, c| {
+            find_unreplied(c, &replied, |r| r.capability == "audio.stop").is_some()
+        });
+        let ast = find_unreplied(&acc, &replied, |r| r.capability == "audio.stop")
+            .unwrap()
+            .clone();
+        reply(&mut mgr, &mut replied, &ast, true, "");
+        wait_rows(&mut mgr, Duration::from_secs(10), |m| {
+            m.latest_rows().iter().any(|r| r.title.contains("granted"))
         });
 
         // ④ 未声明 screenshot.take → 拒绝路径（不触发真实截屏）

@@ -7,18 +7,14 @@
 mod adapters;
 mod cover_disc;
 mod market;
-mod mpris;
 mod nautilus;
 mod page_apps;
 mod page_autodark;
 mod page_clipboard;
 mod page_panel;
 mod page_plugins;
-mod page_radio;
 mod page_settings;
-mod radio_api;
 mod shell_ext;
-mod radio_player;
 mod tray;
 
 use adw::prelude::*;
@@ -32,7 +28,7 @@ use std::cell::RefCell;
 
 const APP_ID: &str = "tools.yihu.desktop";
 /// 侧边栏行序 = stack 页序（呼出面板 --page 深链也按这个名字寻址）
-const PAGES: &[&str] = &["autodark", "clipboard", "apps", "radio", "panel", "plugins", "settings", "about"];
+const PAGES: &[&str] = &["autodark", "clipboard", "apps", "panel", "plugins", "settings", "about"];
 
 thread_local! {
     /// 已构建界面的句柄：命令行转发（--page 深链 / 二次启动置前）需要它。
@@ -101,7 +97,6 @@ fn build_ui(app: &Application) {
     stack.add_named(&page_autodark::build_page(), Some("autodark"));
     stack.add_named(&page_clipboard::build_page(), Some("clipboard"));
     stack.add_named(&page_apps::build_page(), Some("apps"));
-    stack.add_named(&page_radio::build_page(), Some("radio"));
     stack.add_named(&page_panel::build_page(), Some("panel"));
     stack.add_named(&page_plugins::build_page(), Some("plugins"));
     stack.add_named(&page_settings::build_page(), Some("settings"));
@@ -121,7 +116,6 @@ fn build_ui(app: &Application) {
         ("autodark", "night-light-symbolic", "主题切换"),
         ("clipboard", "edit-copy-symbolic", "右键菜单"),
         ("apps", "applications-system-symbolic", "应用跟随"),
-        ("radio", "applications-multimedia-symbolic", "广播"),
         ("panel", "system-search-symbolic", "呼出面板"),
         ("plugins", "application-x-addon-symbolic", "插件"),
         ("settings", "emblem-system-symbolic", "设置"),
@@ -182,15 +176,6 @@ fn build_ui(app: &Application) {
         list.select_row(Some(&row));
     }
     tray::install(app, &window);
-    // 托盘首行「打开广播页」:切到广播页并置前
-    {
-        let stack = stack.clone();
-        let window = window.clone();
-        tray::set_open_radio_page_hook(Box::new(move || {
-            stack.set_visible_child_name("radio");
-            window.present();
-        }));
-    }
     UI.with_borrow_mut(|ui| *ui = Some((stack.clone(), window.clone())));
     window.present();
 }

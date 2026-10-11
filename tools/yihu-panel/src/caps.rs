@@ -55,6 +55,12 @@ pub enum CapAction {
     FsWrite { path: String, text: String },
     /// 经宿主读文件（canonicalize 后仍须命中声明 glob，UTF-8 文本回传）
     FsRead { path: String },
+    /// 经宿主播放音频流（url host ∈ 声明集；gst-play 子进程 + 清单镜像）
+    AudioPlay { url: String },
+    /// 经宿主停止当前音频播放（宿主级单流语义）
+    AudioStop,
+    /// 经宿主调节当前播放流音量（0-100，pactl 单流）
+    AudioVolume { pct: u32 },
 }
 
 /// 从 URL 提取 host[:port]（port 缺省按 scheme 补 443/80）。
@@ -251,6 +257,42 @@ pub fn evaluate(
             }
             Ok(CapAction::NetworkFetch { url: url.to_string() })
         }
+        perms::AUDIO_PLAY => {
+            // 与 network.fetch 同一套 host 白名单校验（流地址 host ∈ 声明集）
+            let url = get("url")?;
+            if url.len() > MAX_URI_LEN {
+                return Err("url 超限".into());
+            }
+            if url.chars().any(|c| c.is_control()) {
+                return Err("url 含控制字符".into());
+            }
+            let (host, port) =
+                url_host_port(url).ok_or_else(|| "url 非法（仅支持 http/https）".to_string())?;
+            let hosts = perms::params_of(declared_raw, capability);
+            if !host_allowed(&hosts, &host, &port) {
+                return Err(format!("host {host}:{port} 不在声明白名单"));
+            }
+            Ok(CapAction::AudioPlay { url: url.to_string() })
+        }
+        perms::AUDIO_STOP => {
+            if !perms::has_plain(declared_raw, capability) {
+                return Err(format!("manifest 未声明能力 {capability}"));
+            }
+            Ok(CapAction::AudioStop)
+        }
+        perms::AUDIO_VOLUME => {
+            if !perms::has_plain(declared_raw, capability) {
+                return Err(format!("manifest 未声明能力 {capability}"));
+            }
+            let pct = params
+                .get("pct")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| "缺少 pct（0-100 整数）".to_string())?;
+            if pct > 100 {
+                return Err("pct 超出 0-100".into());
+            }
+            Ok(CapAction::AudioVolume { pct: pct as u32 })
+        }
         perms::SETTINGS_WRITE => {
             let schema = get("schema")?;
             let key = get("key")?;
@@ -446,6 +488,33 @@ mod tests {
         assert!(!host_allowed(&d, "evil.example.com", "443"));
         // host 相同端口不同的精确声明不匹配
         assert!(!host_allowed(&d, "10.0.0.8", "9090"));
+    }
+
+    #[test]
+    fn audio_caps_enforce_declaration() {
+        let d = declared(&["audio.play@ls.qingting.fm", "audio.stop", "audio.volume"]);
+        let a = evaluate(
+            &d,
+            perms::AUDIO_PLAY,
+            &json!({"url":"https://ls.qingting.fm/live/1133/64k.m3u8"}),
+        )
+        .unwrap();
+        assert!(matches!(a, CapAction::AudioPlay { .. }));
+        // 未声明 host 拒绝（子域也不连带）
+        assert!(evaluate(&d, perms::AUDIO_PLAY, &json!({"url":"https://evil.com/x.m3u8"})).is_err());
+        assert!(evaluate(&d, perms::AUDIO_PLAY, &json!({"url":"https://ls.qingting.fm.evil.com/x"})).is_err());
+        // 非 http(s) scheme 拒绝
+        assert!(evaluate(&d, perms::AUDIO_PLAY, &json!({"url":"ftp://ls.qingting.fm/x"})).is_err());
+        // 未声明 audio.stop/audio.volume 拒绝
+        let e = evaluate(&plain(&[]), perms::AUDIO_STOP, &json!({})).unwrap_err();
+        assert!(e.contains("未声明"), "{e}");
+        // pct 越界拒绝
+        assert!(evaluate(&d, perms::AUDIO_VOLUME, &json!({"pct": 101})).is_err());
+        assert!(evaluate(&d, perms::AUDIO_VOLUME, &json!({})).is_err());
+        let a = evaluate(&d, perms::AUDIO_VOLUME, &json!({"pct": 80})).unwrap();
+        assert!(matches!(a, CapAction::AudioVolume { pct: 80 }));
+        let a = evaluate(&d, perms::AUDIO_STOP, &json!({})).unwrap();
+        assert!(matches!(a, CapAction::AudioStop));
     }
 
     #[test]

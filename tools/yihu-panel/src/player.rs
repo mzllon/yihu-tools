@@ -1,18 +1,20 @@
-//! 「广播」播放执行端：gst-play-1.0 子进程 + 直播清单本地镜像。
+//! 电台播放执行端（M5 电台插件化）：宿主代播的后端。
 //!
-//! 中心只承担启停、音量、清单镜像与状态，解码播放全部发生在子进程内；
-//! 停止或退出中心即结束子进程，满足「零常驻、执行端独立」约束。
+//! 插件沙箱无网无声——播放全部发生在宿主（面板守护进程）侧：
+//! gst-play-1.0 子进程 + 直播清单本地镜像。守护进程常驻，收起面板
+//! 音乐不断；守护进程退出（Drop）即停播，满足「零孤儿」约束。
 //!
 //! 为什么镜像清单：蜻蜓直播清单里的分片是协议相对地址（`//host/...`），
 //! GStreamer 的 HLS 解析器会错误拼接为「错误主机 + 路径」导致分片 404、
-//! 永远无法预滚（浏览器按标准解析所以正常）。中心把清单改写为绝对地址
+//! 永远无法预滚（浏览器按标准解析所以正常）。宿主把清单改写为绝对地址
 //! 落到本地文件，播放器消费本地清单即可正常拉流。
 //!
 //! 音量为「按流单独控制」：经 pactl 定位本播放进程的 sink-input，
-//! 只调本应用的播放音量，不影响系统与其他应用。
+//! 只调本播放的音量，不影响系统与其他应用。
+//!
+//! owner 跟踪：play() 记录发起播放的插件会话 id，供 tick 检查——
+//! 属主会话死亡（崩溃/禁用重启）即停播，避免孤儿音频。
 
-use std::cell::Cell;
-use std::io;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -70,6 +72,15 @@ fn write_manifest_atomic(path: &str, text: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// 阻塞式 GET 文本（清单镜像线程用）。gio TLS 由 glib-networking 提供。
+fn fetch_text(uri: &str) -> Result<String, String> {
+    use gtk::gio::prelude::FileExtManual;
+    let (bytes, _) = gtk::gio::File::for_uri(uri)
+        .load_contents(gtk::gio::Cancellable::NONE)
+        .map_err(|e| e.to_string())?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| "响应不是有效 UTF-8".to_owned())
+}
+
 /// 从 `pactl list sink-inputs` 输出中定位属于 pid 的 sink-input 序号。
 /// 输出形如：
 /// ```text
@@ -109,7 +120,7 @@ fn has_gst_element(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 广播播放缺失的系统组件（apt 包名）。
+/// 电台播放缺失的系统组件（apt 包名）。
 pub fn probe_missing() -> Vec<&'static str> {
     let mut missing = Vec::new();
     if !has_command("gst-play-1.0") {
@@ -127,27 +138,7 @@ pub fn probe_missing() -> Vec<&'static str> {
     missing
 }
 
-/// 一键安装缺失组件：pkexec 弹系统授权对话框（同「右键菜单」页惯例），
-/// 输入一次密码自动完成。返回 false 表示授权被取消或安装未成功。
-/// 阻塞式调用，请勿在 UI 主线程直接使用。
-pub fn install_missing_via_pkexec() -> io::Result<bool> {
-    let missing = probe_missing();
-    if missing.is_empty() {
-        return Ok(true);
-    }
-    let status = Command::new("pkexec")
-        .arg("apt-get")
-        .arg("install")
-        .arg("-y")
-        .args(&missing)
-        .status()?;
-    if !status.success() {
-        return Ok(false);
-    }
-    Ok(probe_missing().is_empty())
-}
-
-/// 清理本用户遗留的孤儿播放进程（一呼被强制终止时 gst-play 会存活）。
+/// 清理本用户遗留的孤儿播放进程（宿主被强制终止时 gst-play 会存活）。
 /// gst-play-1.0 极少被其他程序使用，按进程名精确匹配即可安全清理。
 pub fn kill_orphan_players() {
     let Ok(entries) = std::fs::read_dir("/proc") else { return };
@@ -178,14 +169,16 @@ pub fn kill_orphan_players() {
     }
 }
 
+/// Sync 安全的 RadioPlayer：跨线程共享（Arc）给能力作业线程与主循环。
 #[derive(Default)]
 pub struct RadioPlayer {
-    /// 由镜像线程在首次清单落地后填入；Mutex 保证跨线程安全。
     child: Mutex<Option<Child>>,
     /// 播放流在声音服务器中的 sink-input 序号缓存；切台/停止后失效。
-    sink_index: Cell<Option<u32>>,
-    pactl_ok: Cell<bool>,
+    sink_index: Mutex<Option<u32>>,
+    pactl_ok: Mutex<bool>,
     mirror_stop: Mutex<Option<std::sync::Arc<AtomicBool>>>,
+    /// 发起当前播放的插件会话 id（kill_all/会话死亡停播的依据）。
+    owner: Mutex<Option<String>>,
 }
 
 impl RadioPlayer {
@@ -193,22 +186,23 @@ impl RadioPlayer {
         Self::default()
     }
 
-    /// 播放前探测运行环境，缺失时提示可在本页一键安装。
+    /// 播放前探测运行环境，缺失时返回可安装的 apt 包名列表。
     pub fn probe(&self) -> Result<(), String> {
         let missing = probe_missing();
         if missing.is_empty() {
             return Ok(());
         }
         Err(format!(
-            "缺少播放组件：{}（可在广播页「播放依赖」一键安装）",
-            missing.join("、")
+            "缺少播放组件：{}（请安装：sudo apt install {}）",
+            missing.join("、"),
+            missing.join(" ")
         ))
     }
 
-    /// 播放 `stream_url` 对应的直播流：清理孤儿播放进程与陈旧清单，
-    /// 启动清单镜像线程，首份新清单落地后（通常 <1s，离线时最多等 5s）
-    /// 拉起 gst-play 子进程。
-    pub fn play(&self, stream_url: &str) -> Result<(), String> {
+    /// 播放 `stream_url`：清理孤儿播放进程与陈旧清单，启动清单镜像线程，
+    /// 首份新清单落地后（通常 <1s，离线时最多等 5s）拉起 gst-play 子进程。
+    /// **阻塞可达 5s——只能在后台线程调用**（能力作业线程）。
+    pub fn play(&self, stream_url: &str, owner: &str) -> Result<(), String> {
         self.probe()?;
         self.stop();
         kill_orphan_players();
@@ -222,17 +216,17 @@ impl RadioPlayer {
         }
         let stream_url = stream_url.to_owned();
         let stop_for_thread = stop.clone();
-        let handle = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("yihu-radio-mirror".into())
             .spawn(move || {
                 loop {
-                    match crate::radio_api::fetch_text(&stream_url) {
+                    match fetch_text(&stream_url) {
                         Ok(text) => {
                             let fixed = absolutize_manifest(&text, &stream_url);
                             let _ = write_manifest_atomic(MIRROR_MANIFEST, &fixed);
                         }
                         Err(e) => {
-                            eprintln!("[广播] 清单镜像获取失败：{e}");
+                            eprintln!("[电台] 清单镜像获取失败：{e}");
                         }
                     }
                     if stop_for_thread.load(Ordering::Acquire) {
@@ -242,7 +236,6 @@ impl RadioPlayer {
                 }
             })
             .map_err(|e| format!("无法启动清单镜像：{e}"))?;
-        let _ = &handle;
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::fs::metadata(MIRROR_MANIFEST).is_err() {
@@ -253,11 +246,16 @@ impl RadioPlayer {
             std::thread::sleep(Duration::from_millis(100));
         }
         self.spawn_player(&Self::manifest_uri());
-        self.sink_index.set(None);
+        *self.sink_index.lock().unwrap() = None;
         if !self.child_playing() {
             return Err("播放器启动失败，详见 /tmp/yihu-radio-player.log".to_owned());
         }
+        *self.owner.lock().unwrap() = Some(owner.to_owned());
         Ok(())
+    }
+
+    fn child_playing(&self) -> bool {
+        self.child.lock().unwrap().is_some()
     }
 
     fn manifest_uri() -> String {
@@ -274,20 +272,25 @@ impl RadioPlayer {
             Some(log) => cmd.stderr(Stdio::from(log)),
             None => cmd.stderr(Stdio::null()),
         };
+        // 独立进程组：绝不并入任何插件会话组，收起杀灭/禁用插件都波及不到它；
+        // 生命周期由宿主显式 stop / Drop / 属主死亡兜底管理。
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
         let child = cmd.spawn().ok();
         *self.child.lock().unwrap() = child;
     }
 
-    fn child_playing(&self) -> bool {
-        self.child.lock().unwrap().is_some()
+    /// 当前播放的属主会话 id（无播放 = None）。
+    pub fn owner(&self) -> Option<String> {
+        self.owner.lock().unwrap().clone()
     }
 
-    /// 播放进程 id；音量按此定位 sink-input。
-    pub fn pid(&self) -> Option<u32> {
-        self.child.lock().unwrap().as_ref().map(Child::id)
-    }
-
-    /// false 表示播放进程已退出；原因见 [`Self::error_tail`]。
+    /// false 表示播放进程已退出；原因见 `PLAYER_LOG`。
     pub fn is_playing(&self) -> bool {
         let mut slot = self.child.lock().unwrap();
         match slot.as_mut() {
@@ -302,28 +305,12 @@ impl RadioPlayer {
         }
     }
 
-    /// 播放器日志的最后一行（截断到 160 字符），用于界面提示真实原因。
-    pub fn error_tail(&self) -> String {
-        std::fs::read_to_string(PLAYER_LOG)
-            .ok()
-            .and_then(|text| {
-                text.lines().rev().find(|l| !l.trim().is_empty()).map(str::to_owned)
-            })
-            .map(|line| {
-                if line.chars().count() > 160 {
-                    let truncated: String = line.chars().take(160).collect();
-                    format!("{truncated}…")
-                } else {
-                    line
-                }
-            })
-            .unwrap_or_default()
-    }
-
     /// 单独调节本播放流音量（0–100），不改系统与其他应用的音量。
     pub fn set_volume(&self, pct: u32) {
-        let Some(pid) = self.pid() else { return };
-        if self.sink_index.get().is_none() {
+        let pid = self.child.lock().unwrap().as_ref().map(Child::id);
+        let Some(pid) = pid else { return };
+        let mut sink = self.sink_index.lock().unwrap();
+        if sink.is_none() {
             let resolved = Command::new("pactl")
                 .env("LC_ALL", "C")
                 .arg("list")
@@ -333,10 +320,10 @@ impl RadioPlayer {
                 .filter(|out| out.status.success())
                 .map(|out| find_sink_input(&String::from_utf8_lossy(&out.stdout), pid))
                 .unwrap_or(None);
-            self.sink_index.set(resolved);
-            self.pactl_ok.set(resolved.is_some());
+            *sink = resolved;
+            *self.pactl_ok.lock().unwrap() = resolved.is_some();
         }
-        if let Some(idx) = self.sink_index.get() {
+        if let Some(idx) = *sink {
             let ok = Command::new("pactl")
                 .env("LC_ALL", "C")
                 .args(["set-sink-input-volume", &idx.to_string(), &format!("{pct}%")])
@@ -345,35 +332,29 @@ impl RadioPlayer {
                 .unwrap_or(false);
             if !ok {
                 // 序号可能已失效（切台/声服务器重启），下次重新解析。
-                self.sink_index.set(None);
+                *sink = None;
             }
         }
-    }
-
-    pub fn volume_available(&self) -> bool {
-        if self.pactl_ok.get() {
-            return true;
-        }
-        let ok = Command::new("pactl")
-            .env("LC_ALL", "C")
-            .arg("info")
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false);
-        self.pactl_ok.set(ok);
-        ok
     }
 
     pub fn stop(&self) {
         if let Some(stop) = self.mirror_stop.lock().unwrap().take() {
             stop.store(true, Ordering::Release);
         }
+        *self.owner.lock().unwrap() = None;
+        *self.sink_index.lock().unwrap() = None;
         let child = self.child.lock().unwrap().take();
         if let Some(mut child) = child {
-            self.sink_index.set(None);
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+impl Drop for RadioPlayer {
+    fn drop(&mut self) {
+        // 守护进程退出即停播：不留孤儿音频
+        self.stop();
     }
 }
 
@@ -398,7 +379,7 @@ mod tests {
         assert!(!player.is_playing());
         player.stop();
         assert!(!player.is_playing());
-        assert!(player.pid().is_none());
+        assert!(player.owner().is_none());
     }
 
     #[test]

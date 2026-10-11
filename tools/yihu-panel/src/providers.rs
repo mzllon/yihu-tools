@@ -23,7 +23,6 @@ pub use yihu_core::plugins::SYSTEM_PLUGINS;
 pub fn owner_of(payload: &str) -> &'static str {
     match payload {
         "theme:dark" | "theme:light" | "page:autodark" => "autodark",
-        "page:radio" => "radio",
         "center" => "applinks",
         p if p.starts_with("sys:") => "syscmd",
         p if p.starts_with("web:") => "webdirect",
@@ -65,13 +64,6 @@ impl BuiltinProvider {
                 icon_spec: "tools.yihu.desktop".into(),
                 kind: "cap",
                 payload: "center".into(),
-            },
-            PanelEntry {
-                title: "打开广播页".into(),
-                subtitle: "一呼 · 能力".into(),
-                icon_spec: "applications-multimedia-symbolic".into(),
-                kind: "cap",
-                payload: "page:radio".into(),
             },
             PanelEntry {
                 title: "打开主题切换页".into(),
@@ -183,7 +175,6 @@ impl BuiltinProvider {
                         "theme:dark" => "深色 dark",
                         "theme:light" => "浅色 light",
                         "center" => "中心 center",
-                        "page:radio" => "广播 radio",
                         "page:autodark" => "主题 theme",
                         "sys:lock" => "lock",
                         "sys:suspend" => "suspend",
@@ -444,12 +435,11 @@ mod pluggable_tests {
 
     #[test]
     fn registry_shape_and_owners() {
-        assert!(SYSTEM_PLUGINS.len() >= 6);
+        assert!(SYSTEM_PLUGINS.len() >= 5);
         for p in SYSTEM_PLUGINS {
             assert!(!p.name.is_empty() && !p.desc.is_empty(), "{} 缺名称/描述", p.id);
         }
         assert_eq!(owner_of("theme:dark"), "autodark");
-        assert_eq!(owner_of("page:radio"), "radio");
         assert_eq!(owner_of("sys:lock"), "syscmd");
         assert_eq!(owner_of("web:https://x"), "webdirect");
         assert_eq!(owner_of("center"), "applinks");
@@ -463,11 +453,8 @@ mod pluggable_tests {
         assert!(rows.is_empty(), "停用 AutoDark 后深色不得命中: {rows:?}");
         let rows = BuiltinProvider::query("suoding", &enabled);
         assert!(rows.iter().any(|e| e.payload == "sys:lock"));
-        // 电台/AutoDark 各自独立：停 radio 不影响 autodark
-        let rows = BuiltinProvider::query("广播", &without("radio"));
-        assert!(rows.is_empty());
-        let rows = BuiltinProvider::query("深色", &without("radio"));
-        assert!(rows.iter().any(|e| e.payload == "theme:dark"));
+        let rows = BuiltinProvider::query("深色", &without("autodark"));
+        assert!(rows.is_empty(), "停用 AutoDark 后深色/主题页不得命中: {rows:?}");
     }
 
     #[test]

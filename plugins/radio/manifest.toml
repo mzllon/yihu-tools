@@ -1,0 +1,23 @@
+id = "radio"
+name = "电台"
+version = "1.0.0"
+api = "^1"
+entry = "radio.py"
+icon = "applications-multimedia-symbolic"
+# 常驻：面板收起不杀（播放由宿主代执行，本会话保持可控制）；空闲自退在
+# 宿主播放期间整体跳过（sessions sweep），收听不受 300s 空闲限制。
+resident = true
+
+[[triggers]]
+keywords = ["radio", "电台", "广播", "fm", "收音机"]
+
+# 沙箱无网无声：分类/频道/搜索走 network.fetch，播放/音量/停止走宿主
+# audio.*（gst-play 子进程 + 清单镜像在宿主侧，见 panel/player.rs）。
+# 收藏存插件自己的数据目录（/data），无需任何 fs 能力。
+permissions = [
+    "network.fetch@rapi.qtfm.cn",
+    "network.fetch@search.qingting.fm",
+    "audio.play@ls.qingting.fm",
+    "audio.stop",
+    "audio.volume",
+]

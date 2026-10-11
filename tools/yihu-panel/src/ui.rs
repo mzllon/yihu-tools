@@ -22,7 +22,9 @@
 //!    "actions":[{"key":"run","label":"转换"}],      ← v2 动作按钮：不关窗，
 //!                                                     点击回 action:<key> + 当前 values
 //!    "output":{"rows":[                             ← v2 输出区：结果行 + 行内复制
-//!      {"title":"MD5","subtitle":"32 位","copy":"<完整值>","preview":"<多行预览>"}
+//!      {"title":"MD5","subtitle":"32 位","copy":"<完整值>","preview":"<多行预览>"},
+//!      {"title":"杭州交通91.8","subtitle":"正在播：…",          ← v2.1 行内动作按钮
+//!       "actions":[{"key":"play:1133","label":"▶ 播放"}]}
 //!    ]},
 //!    "submit":"保存"}
 //!
@@ -411,7 +413,25 @@ fn build_content(spec: &serde_json::Value) -> Result<Built, String> {
                 txt_col.append(&sl);
             }
             head.append(&txt_col);
-            if let Some(val) = r
+            if let Some(list) = r.get("actions").and_then(|v| v.as_array()) {
+                // v2.1 行内动作按钮：点击回 action:<key>（与窗级 actions
+                // 同一事件语义），供「列表里直接 ▶ 播放」类交互（电台等）
+                for a in list.iter().take(3) {
+                    let key = a
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if key.is_empty() {
+                        return Err("output 行 actions 项缺 key".into());
+                    }
+                    let label = a.get("label").and_then(|v| v.as_str()).unwrap_or(&key);
+                    let b = Button::with_label(label);
+                    b.set_valign(Align::Center);
+                    head.append(&b);
+                    actions.push((key, b));
+                }
+            } else if let Some(val) = r
                 .get("copy")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())

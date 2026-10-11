@@ -283,16 +283,13 @@ pub struct SystemPluginDef {
     pub desc: &'static str,
 }
 
+// 电台已插件化（M5 第五批）：真插件 plugins/radio（resident + audio.*
+// 能力），不再有系统内置入口；本表只保留轻量功能单元。
 pub const SYSTEM_PLUGINS: &[SystemPluginDef] = &[
     SystemPluginDef {
         id: "autodark",
         name: "深浅色切换（AutoDark）",
         desc: "面板搜索里的深色/浅色切换与主题页入口；定时切换本体在中心 AutoDark 页单独启停",
-    },
-    SystemPluginDef {
-        id: "radio",
-        name: "电台",
-        desc: "面板搜索里的广播页入口；播放器本体在中心应用（UI 插件化等 M5 形态决策）",
     },
     SystemPluginDef {
         id: "syscmd",

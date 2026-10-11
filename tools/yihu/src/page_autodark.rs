@@ -381,7 +381,7 @@ fn sync_mode_style(ui: &Ui) {
     }
 }
 
-/// 模式卡：radio + 标题 + 描述，选中态由 sync_mode_style 加 mode-selected 类
+/// 模式卡：圆钮 + 标题 + 描述，选中态由 sync_mode_style 加 mode-selected 类
 fn mode_card(rb: &CheckButton, desc: &str) -> GtkBox {
     let b = GtkBox::new(Orientation::Vertical, 4);
     b.add_css_class("card");

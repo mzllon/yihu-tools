@@ -8,6 +8,7 @@ mod app;
 mod caps;
 mod calc;
 mod pinyin_index;
+mod player;
 mod providers;
 mod sandbox;
 mod screenshot;
