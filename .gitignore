@@ -5,3 +5,4 @@ dist/
 .DS_Store
 .zcode/
 tools/sysdash/target/
+__pycache__/

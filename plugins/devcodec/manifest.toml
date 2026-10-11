@@ -1,0 +1,11 @@
+id = "devcodec"
+name = "开发者编码工具箱"
+version = "0.1.0"
+api = "^1"
+entry = "devcodec.py"
+icon = "applications-utilities"
+
+[[triggers]]
+keywords = ["codec", "编码", "b64", "base64", "hash", "jwt"]
+
+permissions = []

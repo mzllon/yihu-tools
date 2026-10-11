@@ -515,14 +515,15 @@ impl PluginMgr {
         (dirty, caps, uis)
     }
 
-    /// 向指定会话回传 UI 事件（ui.event）
+    /// 向指定会话回传 UI 事件（ui.event）。values 非空时内联为 JSON 对象
+    /// （submit 与 v2 的 action:<key> 都带；cancel 不带）。
     pub fn send_ui_event(&mut self, plugin: &str, gen: u64, ui_id: u64, event: &str, values: &str) {
-        let line = if event == "submit" {
-            format!(
-                "{{\"type\":\"ui.event\",\"ui_id\":{ui_id},\"event\":\"submit\",\"values\":{values}}}"
-            )
-        } else {
+        let line = if values.is_empty() {
             format!("{{\"type\":\"ui.event\",\"ui_id\":{ui_id},\"event\":\"{event}\"}}")
+        } else {
+            format!(
+                "{{\"type\":\"ui.event\",\"ui_id\":{ui_id},\"event\":\"{event}\",\"values\":{values}}}"
+            )
         };
         self.send_to_session(plugin, gen, &line);
     }

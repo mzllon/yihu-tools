@@ -1,0 +1,11 @@
+id = "sqlfmt"
+name = "SQL 格式化"
+version = "0.1.0"
+api = "^1"
+entry = "sqlfmt.py"
+icon = "accessories-text-editor"
+
+[[triggers]]
+keywords = ["sql", "格式化"]
+
+permissions = []
