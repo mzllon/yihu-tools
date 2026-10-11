@@ -1345,7 +1345,7 @@ fn spawn_detached_checked(program: &str, args: &[&str]) -> Result<(), String> {
 }
 
 /// 按 kind 分发条目动作：app 启动 / cap 执行 / calc 复制 / plugin 转发。
-fn dispatch_item(deps: &Deps, store: &gio::ListStore, pos: u32, slot: &Slot) {
+fn dispatch_item(deps: &Rc<Deps>, store: &gio::ListStore, pos: u32, slot: &Slot) {
     let Some(obj) = store.item(pos) else {
         return;
     };
@@ -1384,7 +1384,20 @@ fn dispatch_item(deps: &Deps, store: &gio::ListStore, pos: u32, slot: &Slot) {
         }
         deps.plugins.borrow_mut().activate(pid, pl);
         record(&deps.history, &format!("plugin:{pid}"));
-        hide_panel(deps, slot);
+        if copy {
+            hide_panel(deps, slot);
+        } else {
+            // 动作型激活：插件要在回包里开 UI（ui.show）或继续编排能力请求，
+            // 回包要经 30ms tick 抽走，UI 打开才会 pin 会话。立即收起会在
+            // pin 生效前 kill_all 把会话连根杀掉，回包全部丢失（内容推荐行、
+            // hotkeys「新增」行均走此路径）。留 200ms 生命窗：回包落地即
+            // pin，届时 kill_all 跳过；无回包则到点照常收起杀灭，零泄漏。
+            let deps2 = deps.clone();
+            let slot2 = slot.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || {
+                hide_panel(&deps2, &slot2);
+            });
+        }
         return;
     }
     perform_entry(

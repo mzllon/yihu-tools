@@ -258,9 +258,9 @@ def show_list(qid, paths, entries):
         e = entries.get(p, {})
         rows.append((fmt_binding(e.get("binding", "?")) + " → " + e.get("name", ""),
                      e.get("command", "")))
-        payloads.append("edit:" + p)
+        payloads.append("!edit:" + p)  # ! 前缀：宿主不复制、激活延迟收起（动作型）
     rows.append(("➕ 新增快捷键（回车打开表单）", "按下的组合键即绑定 · 动作从应用列表点选"))
-    payloads.append("new")
+    payloads.append("!new")
     _results(qid, rows, payloads)
 
 

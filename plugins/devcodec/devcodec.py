@@ -1,17 +1,21 @@
 #!/usr/bin/python3
 """开发者编码工具箱（M5 UI 插件层 v2 首个工具箱插件）。
 
-面板输入 codec / 编码 打开工具窗：select 选操作 + textarea 贴文本 +
-「转换」按钮（不关窗原地出结果）→ output 结果行，行内「复制」由宿主
-直写剪贴板（与列表激活复制同一宿主语义，本插件零权限声明）。
-
-快捷路径：首词命中别名（b64 / hash / jwt / d2h …）即带着操作与输入
-直接打开并算好结果。支持多行文本（哈希按整段算）。
+三条进入路径：
+1. 子模块一键直达：codec/编码 开窗；首词命中别名（base / b64 / hash / jwt /
+   hex / bin / d2h / 大写 …）带着操作与输入直开直算。
+2. 内容推荐：查询全量广播下嗅探输入形态——Base64（解码后须为合法 UTF-8
+   文本，压误报）/ JWT（eyJ 三段式）/ 二进制 / HEX——回推荐行，回车由
+   activate 带原文打开对应工具。payload 用 `!` 前缀（宿主不复制，且激活
+   后宿主延迟收起给回包留生命窗）。
+3. 窗内转换：select 选操作 + textarea 贴文本 + 「转换」不关窗原地出结果；
+   行内「复制」由宿主直写剪贴板（零权限声明）。
 """
 
 import base64
 import hashlib
 import json
+import re
 import sys
 import urllib.parse
 
@@ -30,25 +34,28 @@ OPS = [
     ("jwt", "JWT 解码"),
 ]
 
-# 首词别名 → 操作（query 快捷路径）
+# 首词别名 → 操作（子模块一键直达）
 ALIASES = {
-    "b64": "b64enc", "b64enc": "b64enc", "base64": "b64enc",
+    "b64": "b64enc", "b64enc": "b64enc", "base": "b64enc", "base64": "b64enc",
     "b64d": "b64dec", "b64dec": "b64dec",
-    "urlenc": "urlenc", "urlencode": "urlenc",
+    "url": "urlenc", "urlenc": "urlenc", "urlencode": "urlenc",
     "urldec": "urldec", "urldecode": "urldec",
     "hash": "hash", "md5": "hash", "sha": "hash", "sha1": "hash", "sha256": "hash",
+    "哈希": "hash",
     "hex2dec": "hex2dec", "h2d": "hex2dec",
-    "dec2hex": "dec2hex", "d2h": "dec2hex",
-    "dec2bin": "dec2bin", "d2b": "dec2bin",
+    "hex": "dec2hex", "dec2hex": "dec2hex", "d2h": "dec2hex",
+    "bin": "dec2bin", "dec2bin": "dec2bin", "d2b": "dec2bin",
     "bin2dec": "bin2dec", "b2d": "bin2dec",
     "upper": "upper", "大写": "upper",
     "lower": "lower", "小写": "lower",
     "jwt": "jwt",
+    "解码": "b64dec",
 }
 
 HINTS = {"codec", "devcodec", "编码", "编码工具箱", "工具箱", "开发者工具"}
 
 UI_SEQ = 100
+LAST = {}  # qid -> 原文（嗅探推荐行激活时带原文开窗）
 
 
 def send(o):
@@ -100,10 +107,17 @@ def compute(op, text):
             out = str(int(s, 16))
             return [row("HEX → 十进制", "回车或点「复制」", out)]
         if op == "dec2hex":
-            out = "0x" + format(int(text.strip(), 10), "X")
+            s = text.strip()
+            if s.lower().startswith("0x"):
+                # 贴了 HEX 进「给我 HEX」操作：自动反向
+                return compute("hex2dec", s)
+            out = "0x" + format(int(s, 10), "X")
             return [row("十进制 → HEX", "回车或点「复制」", out)]
         if op == "dec2bin":
-            out = format(int(text.strip(), 10), "b")
+            s = text.strip()
+            if s.lower().startswith("0b"):
+                return compute("bin2dec", s)
+            out = format(int(s, 10), "b")
             return [row("十进制 → 二进制", "回车或点「复制」", out)]
         if op == "bin2dec":
             s = text.strip().removeprefix("0b").replace(" ", "")
@@ -134,6 +148,34 @@ def compute(op, text):
     except Exception as e:
         msg = str(e).split("\n")[0]
         return [err_row(f"{msg}（输入不匹配 {op}？）")]
+
+
+def sniff(text):
+    """内容形态嗅探 → (op, 中文标签) | None。纯函数判断，零 IO。"""
+    s = text.strip()
+    if not s:
+        return None
+    # JWT：三段 base64url，首段 eyJ 开头（{" 的 Base64）
+    if re.fullmatch(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*", s):
+        return ("jwt", "检测到 JWT 令牌")
+    # Base64：字母表匹配 + 试解码须为合法 UTF-8 文本（压掉乱码误报）
+    if len(s) >= 16 and re.fullmatch(r"[A-Za-z0-9+/_-]+={0,2}", s):
+        t = s.replace("-", "+").replace("_", "/")
+        try:
+            base64.b64decode(_b64pad(t), validate=True).decode("utf-8")
+        except Exception:
+            pass
+        else:
+            return ("b64dec", "检测到 Base64 文本")
+    # 二进制：8 位一组
+    if re.fullmatch(r"[01]{8,}(?:\s+[01]{8,})*", s):
+        return ("bin2dec", "检测到二进制串")
+    # HEX：≥8 位且至少含一个 a-f 字母（纯数字交给计算器/时间戳，不抢）
+    if re.fullmatch(r"0x[0-9a-fA-F]{4,}|[0-9a-fA-F]{8,}", s) and (
+        s.lower().startswith("0x") or re.search(r"[a-fA-F]", s)
+    ):
+        return ("hex2dec", "检测到 HEX 串")
+    return None
 
 
 def ui_spec(ui_id, op, text, rows):
@@ -178,19 +220,35 @@ def main():
             return
 
         elif t == "query":
+            qid = msg.get("id", 0)
             text = (msg.get("text") or "").strip()
             low = text.lower()
-            # 查询全量广播：只响应本插件词头，其余静默（面板/其他插件处理）
+            # 查询全量广播：只响应本插件词头/形态，其余静默
             if low in HINTS:
                 UI_SEQ += 1
                 send(ui_spec(UI_SEQ, "b64enc", "", []))
-            else:
+            elif text:
                 head, _, tail = text.partition(" ")
                 op = ALIASES.get(head.lower().strip())
                 if op:
                     UI_SEQ += 1
                     rows = compute(op, tail) if tail.strip() else []
                     send(ui_spec(UI_SEQ, op, tail, rows))
+                else:
+                    hit = sniff(text)
+                    if hit:
+                        op, label = hit
+                        LAST[qid] = text
+                        send({
+                            "type": "results",
+                            "query_id": qid,
+                            "items": [{
+                                "title": f"🔑 {label} · 回车打开工具",
+                                "subtitle": "内容自动带入对应操作",
+                                "icon": "applications-utilities",
+                                "payload": "!open:" + op,
+                            }],
+                        })
 
         elif t == "ui.event":
             ev = msg.get("event") or ""
@@ -200,6 +258,15 @@ def main():
                 text = values.get("input", "")
                 rows = compute(op, text)
                 send(ui_spec(msg.get("ui_id", 0), op, text, rows))
+
+        elif t == "activate":
+            payload = msg.get("payload") or ""
+            if payload.startswith("open:"):
+                op = payload[5:]
+                text = LAST.pop(msg.get("id", 0), "")
+                rows = compute(op, text) if text.strip() else []
+                UI_SEQ += 1
+                send(ui_spec(UI_SEQ, op, text, rows))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ textarea 贴 SQL → 「格式化」「压缩」按钮不关窗原地出结果�
 """
 
 import json
+import re
 import sys
 
 HINTS = {"sql", "sqlfmt"}
@@ -227,8 +228,6 @@ def compact_sql(sql):
 
 # ---- 协议 ------------------------------------------------------------------
 
-UI_SEQ = 100
-
 
 def ui_spec(ui_id, sql, rows):
     spec = {
@@ -262,6 +261,23 @@ def rows_compact(sql):
              "copy": sql, "preview": sql}]
 
 
+# 内容嗅探：SQL 形态（须够特征，避免英语句子误报）
+SNIFF_PATTERNS = [
+    re.compile(r"(?is)^\s*select\s.+\bfrom\b"),
+    re.compile(r"(?is)^\s*insert\s+into\s"),
+    re.compile(r"(?is)^\s*update\s+\S+\s+set\s"),
+    re.compile(r"(?is)^\s*delete\s+from\s"),
+]
+
+UI_SEQ = 100
+LAST = {}  # qid -> 原文（嗅探推荐行激活时带原文开窗）
+
+
+def sniff_sql(text):
+    s = text.strip()
+    return len(s) >= 12 and any(p.match(s) for p in SNIFF_PATTERNS)
+
+
 def main():
     global UI_SEQ
     for line in sys.stdin:
@@ -278,9 +294,10 @@ def main():
             return
 
         elif t == "query":
+            qid = msg.get("id", 0)
             text = (msg.get("text") or "").strip()
             low = text.lower()
-            # 只响应 sql 词头（查询全量广播，非本插件词头静默）
+            # 只响应 sql 词头与 SQL 形态（查询全量广播，其余静默）
             if low in HINTS:
                 UI_SEQ += 1
                 send(ui_spec(UI_SEQ, "", []))
@@ -289,6 +306,18 @@ def main():
                 UI_SEQ += 1
                 rows = rows_fmt(format_sql(rest)) if rest else []
                 send(ui_spec(UI_SEQ, rest, rows))
+            elif sniff_sql(text):
+                LAST[qid] = text
+                send({
+                    "type": "results",
+                    "query_id": qid,
+                    "items": [{
+                        "title": "📄 检测到 SQL 语句 · 回车格式化",
+                        "subtitle": "原文带入格式化窗口",
+                        "icon": "accessories-text-editor",
+                        "payload": "!open",
+                    }],
+                })
 
         elif t == "ui.event":
             ev = msg.get("event") or ""
@@ -298,6 +327,14 @@ def main():
             elif ev == "action:compact":
                 sql = (msg.get("values") or {}).get("sql", "")
                 send(ui_spec(msg.get("ui_id", 0), sql, rows_compact(compact_sql(sql))))
+
+        elif t == "activate":
+            # 嗅探推荐行激活：带原文开窗并预格式化
+            if (msg.get("payload") or "") == "open":
+                text = LAST.pop(msg.get("id", 0), "")
+                rows = rows_fmt(format_sql(text)) if text.strip() else []
+                UI_SEQ += 1
+                send(ui_spec(UI_SEQ, text, rows))
 
 
 if __name__ == "__main__":

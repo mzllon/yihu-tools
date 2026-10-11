@@ -6,7 +6,9 @@
 capability_response.data 回传文本。激活复制由宿主激活语义自动完成
 （payload 不带 `!` 前缀 = 回车自动复制），插件自身无需 clipboard.write。
 
-查询只在输入恰为 json / json 格式化 时触发，避免每次击键都发读请求。
+查询触发词：json / json格式化（读剪贴板）；另外内容嗅探——输入本身
+形如 JSON（{ 或 [ 开头且可解析）时回推荐行，回车直接把原文格式化/
+压缩（activate 带原文，不再绕剪贴板）。
 """
 
 import json
@@ -15,10 +17,21 @@ import sys
 # 触发词（小写化后精确匹配）
 TRIGGERS = {"json", "json格式化", "json 格式化"}
 
+LAST = {}  # qid -> 原文（嗅探推荐行激活时直出结果）
+
 
 def send(obj):
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+def _parses(text):
+    """能否解析为 JSON（嗅探用，不抛异常）。"""
+    try:
+        json.loads(text)
+        return True
+    except Exception:
+        return False
 
 
 def rows_for(text):
@@ -65,18 +78,37 @@ def main():
             return
 
         elif t == "query":
+            qid = msg.get("id", 0)
             text = (msg.get("text") or "").strip()
-            if text.lower() not in TRIGGERS:
-                continue
-            # 触发：请宿主代读剪贴板（manifest 已声明 clipboard.read）
-            rid = 1000 + msg["id"]
-            pending[rid] = msg["id"]
-            send({
-                "type": "capability_request",
-                "id": rid,
-                "capability": "clipboard.read",
-                "params": {},
-            })
+            if text.lower() in TRIGGERS:
+                # 触发：请宿主代读剪贴板（manifest 已声明 clipboard.read）
+                rid = 1000 + msg["id"]
+                pending[rid] = msg["id"]
+                send({
+                    "type": "capability_request",
+                    "id": rid,
+                    "capability": "clipboard.read",
+                    "params": {},
+                })
+            elif text[:1] in ("{", "[") and _parses(text):
+                # 内容嗅探：输入本身就是 JSON → 推荐行，回车直出结果
+                LAST[qid] = text
+                send({
+                    "type": "results",
+                    "query_id": qid,
+                    "items": [{
+                        "title": "✓ 检测到 JSON 文本 · 回车格式化",
+                        "subtitle": "原文直接格式化/压缩",
+                        "payload": "!open",
+                    }],
+                })
+
+        elif t == "activate":
+            if (msg.get("payload") or "") == "open":
+                clip = LAST.pop(msg.get("id", 0), "")
+                if clip:
+                    send({"type": "results", "query_id": msg.get("id", 0),
+                          "items": rows_for(clip)})
 
         elif t == "capability_response":
             rid = msg.get("id")
