@@ -1,0 +1,12 @@
+[package]
+name = "mdworkbench"
+version = "0.1.0"
+edition = "2021"
+
+# Markdown 工作台（M6）：独立进程——WebKitGTK 6.0 需 gtk4 0.10+，
+# 与面板（gtk4 0.9）因 links=gtk-4 不能同图，进程级外置（同中心应用惯例）。
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+webkit6 = "0.4"
+yihu-core = { path = "../../crates/yihu-core" }

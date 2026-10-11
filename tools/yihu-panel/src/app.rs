@@ -1541,7 +1541,7 @@ fn spawn_mdrender_job(
     let gen = req.gen;
     let request_id = req.request_id;
     std::thread::spawn(move || {
-        let html = crate::mdrender::render_html(&text);
+        let html = yihu_core::mdrender::render_html(&text);
         let result = if mode == "html" {
             (
                 true,
@@ -1549,7 +1549,7 @@ fn spawn_mdrender_job(
                 Some(serde_json::to_string(&html).unwrap_or_default()),
             )
         } else {
-            match crate::mdrender::write_preview(&html) {
+            match yihu_core::mdrender::write_preview(&html) {
                 Ok(path) => {
                     if let Err(e) =
                         spawn_detached_checked("gio", &["open", &path.display().to_string()])
@@ -1890,6 +1890,16 @@ fn perform_entry(deps: &Deps, slot: &Slot, e: &PanelEntry) {
                 hide_panel(deps, slot);
                 return;
             }
+            if e.payload == "md:workbench" {
+                record(&deps.history, "cap:md:workbench");
+                let bin = sibling("mdworkbench");
+                let _ = spawn_detached_checked(
+                    &bin.display().to_string(),
+                    &[],
+                );
+                hide_panel(deps, slot);
+                return;
+            }
             providers::activate_capability(&e.payload, &deps.center);
             record(&deps.history, &format!("cap:{}", e.payload));
             hide_panel(deps, slot);
@@ -2148,6 +2158,7 @@ fn build_cap_grid(deps: &Rc<Deps>, slot: &Slot) -> gtk::FlowBox {
         ("page:autodark", "主题页", "night-light-symbolic"),
         ("shot:region", "区域截图", "edit-select-symbolic"),
         ("shot:pin", "贴图", "edit-paste-symbolic"),
+        ("md:workbench", "MD 工作台", "text-editor-symbolic"),
         ("sys:lock", "锁屏", "system-lock-screen-symbolic"),
         ("sys:night-light", "夜灯", "night-light-symbolic"),
         ("center", "中心", "tools.yihu.desktop"),
