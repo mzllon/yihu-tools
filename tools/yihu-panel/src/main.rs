@@ -7,8 +7,11 @@
 mod app;
 mod caps;
 mod calc;
+mod overlay;
 mod pinyin_index;
+mod pin;
 mod player;
+mod shotengine;
 mod providers;
 mod sandbox;
 mod screenshot;

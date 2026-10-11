@@ -65,6 +65,8 @@ struct Deps {
     /// 电台播放执行端（宿主代播：gst-play 子进程 + 清单镜像；M5 电台插件化）。
     /// Arc 跨线程共享给能力作业线程；Drop 停播，守护进程退出零孤儿。
     player: Arc<crate::player::RadioPlayer>,
+    /// 自研截图引擎抓帧结果槽（M6：后台抓帧 → tick 泵回主循环开覆盖层）
+    shot_async: Arc<Mutex<Option<crate::shotengine::ShotMsg>>>,
 }
 
 /// 后台执行的能力结果（截屏/网络/settings/fs 等）：由常驻泵回主循环回包/审计/副作用
@@ -149,6 +151,7 @@ pub fn run_daemon() {
         let app_refresh: Arc<Mutex<Option<Vec<PanelEntry>>>> = Arc::new(Mutex::new(None));
         let cap_async: Arc<Mutex<Vec<CapOutcome>>> = Arc::new(Mutex::new(Vec::new()));
         let player = Arc::new(crate::player::RadioPlayer::new());
+        let shot_async: Arc<Mutex<Option<crate::shotengine::ShotMsg>>> = Arc::new(Mutex::new(None));
         let deps = Rc::new(Deps {
             app: app.clone(),
             plugins,
@@ -168,6 +171,7 @@ pub fn run_daemon() {
             sys_plugins: sys_plugins.clone(),
             cap_async: cap_async.clone(),
             player,
+            shot_async: shot_async.clone(),
         });
 
         // —— 应用列表热刷新（AppInfoMonitor，穿插小项）——
@@ -302,6 +306,34 @@ pub fn run_daemon() {
                         deps.player.stop();
                     }
                 }
+                // 自研截图引擎：抓帧完成 → 开选区覆盖层；失败 → 通知
+                if let Some(msg) = deps.shot_async.lock().unwrap().take() {
+                    match msg {
+                        crate::shotengine::ShotMsg::Frame(png) => {
+                            let decoded = crate::shotengine::pixbuf_from_png(&png);
+                            let result = decoded.and_then(|pb| {
+                                crate::overlay::show(pb, &deps.audit).map(|()| ())
+                            });
+                            if let Err(e) = result {
+                                deps.audit.record("host", 0, "shot.region", "error", &e);
+                                let _ = spawn_detached_checked(
+                                    "notify-send",
+                                    &["--app-name=一呼", &format!("区域截图失败：{e}")],
+                                );
+                            }
+                        }
+                        crate::shotengine::ShotMsg::Failed(e) => {
+                            deps.audit.record("host", 0, "shot.region", "error", &e);
+                            let _ = spawn_detached_checked(
+                                "notify-send",
+                                &[
+                                    "--app-name=一呼",
+                                    &format!("区域截图失败：{e}（首次使用请在授权框点「允许」）"),
+                                ],
+                            );
+                        }
+                    }
+                }
                 while let Ok(cmd) = rx.try_recv() {
                     match cmd {
                         Cmd::Toggle => {
@@ -312,36 +344,13 @@ pub fn run_daemon() {
                             }
                         }
                         Cmd::Screenshot => {
-                            // 快捷键截图：后台 portal 交互截屏，结果经
-                            // cap_async 槽回常驻泵（回包对未知插件是
-                            // no-op，审计/通知统一在泵里做）
-                            deps.audit
-                                .record("hotkey", 0, "screenshot.take", "grant", "");
-                            let slot = deps.cap_async.clone();
-                            std::thread::spawn(move || {
-                                let (ok, error, path) =
-                                    match crate::screenshot::take("area", false) {
-                                        Ok(_) => (
-                                            true,
-                                            String::new(),
-                                            crate::screenshot::latest_shot_hint(),
-                                        ),
-                                        Err(e) => (false, e, String::new()),
-                                    };
-                                slot.lock().unwrap().push(CapOutcome {
-                                    plugin: "hotkey".into(),
-                                    gen: 0,
-                                    request_id: 0,
-                                    capability: "screenshot.take".into(),
-                                    ok,
-                                    error,
-                                    path,
-                                    png: None,
-                                    clipboard: false,
-                                    data: None,
-                                    notify: true,
-                                });
-                            });
+                            // 快捷键截图：自研区域截图引擎（M6）——portal
+                            // 冻结帧 + 自绘选区覆盖层，Enter 复制 / P 贴图 /
+                            // S 保存（抓帧失败走 shot 槽的通知分支）
+                            crate::shotengine::start_region_shot(
+                                &deps.audit,
+                                &deps.shot_async,
+                            );
                         }
                         Cmd::Show => summon(&deps, &slot),
                         Cmd::Hide => hide_panel(&deps, &slot),
@@ -1647,6 +1656,20 @@ fn perform_entry(deps: &Deps, slot: &Slot, e: &PanelEntry) {
             }
         }
         "cap" => {
+            // 自研截图引擎入口（M6）：需要主线程 Deps，先于 activate_capability 分流
+            if e.payload == "shot:region" {
+                record(&deps.history, "cap:shot:region");
+                deps.audit.record("host", 0, "shot.region", "grant", "面板入口");
+                crate::shotengine::start_region_shot(&deps.audit, &deps.shot_async);
+                hide_panel(deps, slot);
+                return;
+            }
+            if e.payload == "shot:pin" {
+                record(&deps.history, "cap:shot:pin");
+                crate::pin::pin_from_clipboard(&deps.audit);
+                hide_panel(deps, slot);
+                return;
+            }
             providers::activate_capability(&e.payload, &deps.center);
             record(&deps.history, &format!("cap:{}", e.payload));
             hide_panel(deps, slot);
@@ -1903,7 +1926,8 @@ fn build_cap_grid(deps: &Rc<Deps>, slot: &Slot) -> gtk::FlowBox {
         ("theme:dark", "深色", "weather-clear-night-symbolic"),
         ("theme:light", "浅色", "weather-clear-symbolic"),
         ("page:autodark", "主题页", "night-light-symbolic"),
-        ("sys:screenshot", "截图", "camera-photo-symbolic"),
+        ("shot:region", "区域截图", "edit-select-symbolic"),
+        ("shot:pin", "贴图", "edit-paste-symbolic"),
         ("sys:lock", "锁屏", "system-lock-screen-symbolic"),
         ("sys:night-light", "夜灯", "night-light-symbolic"),
         ("center", "中心", "tools.yihu.desktop"),

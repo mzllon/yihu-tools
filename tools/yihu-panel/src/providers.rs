@@ -24,7 +24,7 @@ pub fn owner_of(payload: &str) -> &'static str {
     match payload {
         "theme:dark" | "theme:light" | "page:autodark" => "autodark",
         "center" => "applinks",
-        p if p.starts_with("sys:") => "syscmd",
+        p if p.starts_with("sys:") || p.starts_with("shot:") => "syscmd",
         p if p.starts_with("web:") => "webdirect",
         _ => "",
     }
@@ -86,7 +86,9 @@ impl BuiltinProvider {
             ("sys:poweroff", "关机", "system-shutdown-symbolic", "poweroff shutdown"),
             ("sys:reboot", "重启", "view-refresh-symbolic", "reboot restart"),
             ("sys:empty-trash", "清空回收站", "user-trash-symbolic", "trash 回收站"),
-            ("sys:screenshot", "截图", "camera-photo-symbolic", "screenshot"),
+            ("shot:region", "区域截图", "edit-select-symbolic", "jietu quyu 截图"),
+            ("shot:pin", "贴图", "edit-paste-symbolic", "tetu pin 贴图"),
+            ("sys:screenshot", "系统截图工具", "camera-photo-symbolic", "screenshot"),
             ("sys:files", "打开文件管理器", "system-file-manager-symbolic", "files nautilus"),
             ("sys:night-light", "夜灯开关", "night-light-symbolic", "nightlight 夜灯"),
         ];
@@ -181,6 +183,8 @@ impl BuiltinProvider {
                         "sys:poweroff" => "poweroff shutdown",
                         "sys:reboot" => "reboot restart",
                         "sys:empty-trash" => "trash",
+                        "shot:region" => "jietu quyu 截图",
+                        "shot:pin" => "tetu pin 贴图",
                         "sys:screenshot" => "screenshot",
                         "sys:files" => "files nautilus",
                         "sys:night-light" => "nightlight",
@@ -389,7 +393,7 @@ mod direct_tests {
     #[test]
     fn system_commands_query_and_pinyin() {
         let all = BuiltinProvider::system_commands();
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 10);
         assert!(BuiltinProvider::query("suoding", &all_enabled())
             .iter()
             .any(|e| e.payload == "sys:lock"), "拼音命中锁屏");
