@@ -1,13 +1,13 @@
 id = "jsonkit"
 name = "JSON 工具"
-version = "0.1.0"
+version = "0.2.0"
 api = "^1"
 entry = "jsonkit.py"
 icon = "text-x-generic"
 
 [[triggers]]
-keywords = ["json", "JSON"]
+keywords = ["json", "JSON", "格式化"]
 
 # clipboard.read（M5 v2 扩容）：读剪贴板里的 JSON 文本，经宿主代读。
-# 激活复制走宿主激活语义（自动复制 payload），无需声明 clipboard.write。
+# 窗内行内复制走宿主 output 复制语义，无需声明 clipboard.write。
 permissions = ["clipboard.read"]
