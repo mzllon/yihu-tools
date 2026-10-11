@@ -8,5 +8,6 @@ edition = "2021"
 
 [dependencies]
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+serde_json = "1.0.152"
 webkit6 = "0.4"
 yihu-core = { path = "../../crates/yihu-core" }

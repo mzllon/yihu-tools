@@ -1,0 +1,29 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="toastui-editor.min.css">
+<link rel="stylesheet" href="toastui-editor-dark.css" media="(prefers-color-scheme: dark)">
+<style>html,body{margin:0;height:100%}#editor{height:100%}
+body{font-family:system-ui,-apple-system,"Noto Sans CJK SC",sans-serif}</style>
+</head><body><div id="editor"></div>
+<script src="toastui-editor-all.min.js"></script>
+<script>
+function post(o){ try{ window.webkit.messageHandlers.yihu.postMessage(JSON.stringify(o)); }catch(e){} }
+let timer = null;
+const editor = new toastui.Editor({
+  el: document.getElementById('editor'),
+  height: '100%',
+  initialEditType: 'wysiwyg',
+  previewStyle: 'vertical',
+  usageStatistics: false,
+  hideModeSwitch: false,
+  events: {
+    change: () => {
+      if (timer) return;
+      timer = setTimeout(() => { timer = null; post({type:'changed'}); }, 300);
+    }
+  }
+});
+window.yihuGetMd = () => editor.getMarkdown();
+window.yihuSetMd = (md) => { editor.setMarkdown(md, false); };
+window.yihuSetMode = (m) => { editor.changeMode(m); };
+post({type:'ready'});
+</script></body></html>
