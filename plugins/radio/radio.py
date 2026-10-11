@@ -49,7 +49,11 @@ CUR_CAT = FAVORITES_ID
 CURRENT = None   # {"id","title"} 正在播放
 LAST_CH = []     # 最近一次浏览/搜索的频道列表（收藏切换后就地重渲染）
 LAST_SRC = "cat" # LAST_CH 的来源：cat=CUR_CAT 分类 / search=搜索结果
-PENDING_VOL = [80]  # play 请求携带的待应用音量（列表包装避免 global）
+PENDING_VOL = [80]   # play 请求携带的待应用音量（列表包装避免 global）
+LAST_VOL = [80]      # 最近一次窗内/面板使用的音量
+PLAY_FROM_WIN = [False]  # 播放/停止是否来自窗内（决定响应后是否刷窗）
+PANEL_QID = [0]      # 最新一次面板搜台的 query id（丢弃过期击键的迟到响应）
+PANEL_KW = [""]      # 面板搜台关键字（无结果提示用）
 
 
 def send(o):
@@ -242,6 +246,32 @@ def rows_for_source():
     return channel_rows(LAST_CH)
 
 
+# ---- 播放/停止动作（窗内 ui.event 与面板 activate 两入口共用） -------------
+
+def start_play(cid, title, from_window):
+    PLAY_FROM_WIN[0] = from_window
+    PENDING_VOL[0] = LAST_VOL[0]
+    req("played", 0, "audio.play", {"url": stream_url(cid)})
+    global CURRENT
+    CURRENT = {"id": cid, "title": title or f"频道 {cid}"}
+
+
+def stop_play(from_window):
+    PLAY_FROM_WIN[0] = from_window
+    global CURRENT
+    CURRENT = None
+    req("stopped", 0, "audio.stop", {})
+
+
+def panel_stop_row():
+    """面板列表顶部的播放状态行（正在播放 → 回车停止）。"""
+    if CURRENT:
+        return {"title": f"🔊 正在播放：{CURRENT['title']} · 回车停止",
+                "subtitle": "宿主侧播放 · 收起面板不中断",
+                "payload": "!stop"}
+    return None
+
+
 # ---- 主循环 ----------------------------------------------------------------
 
 def main():
@@ -256,6 +286,16 @@ def main():
         if t == "init":
             send({"type": "ready"})
 
+        elif t == "activate":
+            # 面板结果行回车（! 前缀已被宿主剥掉）：回车即播/停止，不弹窗
+            payload = msg.get("payload") or ""
+            if payload == "stop":
+                stop_play(from_window=False)
+            elif payload.startswith("play:"):
+                cid_s, _, title = payload[5:].partition("|")
+                if cid_s.isdigit():
+                    start_play(int(cid_s), title, from_window=False)
+
         elif t == "shutdown":
             return
 
@@ -268,6 +308,26 @@ def main():
                     req("cats", 0, "network.fetch", {"url": CATS_URL})
                 else:
                     show(rows_for_source())
+            else:
+                # 电台 <关键词> → 面板列表直出搜台结果（回车即播）；
+                # 电台 停止/暂停 → 播放状态行（回车停止）
+                head, _, kw = text.partition(" ")
+                if head.lower() in HINTS and kw.strip():
+                    qid = msg.get("id", 0)
+                    kwl = kw.strip().lower()
+                    if kwl in ("停止", "stop", "暂停", "pause"):
+                        items = []
+                        if CURRENT:
+                            items.append(panel_stop_row())
+                        else:
+                            items.append({"title": "⏹ 当前没有在播放",
+                                          "payload": "!none"})
+                        send({"type": "results", "query_id": qid, "items": items})
+                    else:
+                        PANEL_QID[0] = qid
+                        PANEL_KW[0] = kw.strip()
+                        req("panel_search", qid, "network.fetch",
+                            {"url": search_url(kw.strip())})
 
         elif t == "capability_response":
             rid = msg.get("id")
@@ -304,17 +364,41 @@ def main():
                 else:
                     show(channel_rows(LAST_CH))
 
+            elif tag == "panel_search":
+                if qid != PANEL_QID[0]:
+                    continue  # 过期击键的迟到响应，丢弃
+                items = []
+                stop_row = panel_stop_row()
+                if stop_row:
+                    items.append(stop_row)
+                if not ok:
+                    items.append({"title": f"搜索失败：{msg.get('error', '?')}",
+                                  "payload": "!none"})
+                else:
+                    chs = parse_search(data)[:20]
+                    if not chs:
+                        items.append({"title": f"没有匹配「{PANEL_KW[0]}」的直播电台",
+                                      "subtitle": "进电台窗口用分类浏览",
+                                      "payload": "!none"})
+                    for ch in chs:
+                        sub = "回车播放"
+                        if ch["np"]:
+                            sub = f"正在播：{ch['np']} · {sub}"
+                        items.append({"title": ch["title"], "subtitle": sub,
+                                      "payload": f"!play:{ch['id']}|{ch['title']}"})
+                send({"type": "results", "query_id": qid, "items": items})
+
             elif tag == "played":
-                # 播放成功 → 应用音量（值随 play 事件一起带来）
+                # 播放成功 → 应用音量；窗内来源才刷窗（面板来源只出声不弹窗）
                 if ok and CURRENT:
                     req("volumed", qid, "audio.volume", {"pct": PENDING_VOL[0]})
-                else:
+                elif not ok and PLAY_FROM_WIN[0]:
                     show(err=f"播放失败：{msg.get('error', '?')}")
 
             elif tag in ("stopped", "volumed", "volumed2"):
-                if not ok:
+                if not ok and PLAY_FROM_WIN[0]:
                     show(err=f"{tag} 失败：{msg.get('error', '?')}")
-                else:
+                elif PLAY_FROM_WIN[0]:
                     show(rows_for_source())
 
         elif t == "ui.event":
@@ -341,6 +425,7 @@ def main():
                     req("search", 0, "network.fetch", {"url": search_url(kw)})
 
             elif ev == "action:volapply":
+                LAST_VOL[0] = vol
                 req("volumed", 0, "audio.volume", {"pct": vol})
 
             elif ev.startswith("action:play:"):
@@ -349,14 +434,11 @@ def main():
                 if not cid_s.isdigit():
                     show(err="台号非法")
                     continue
-                PENDING_VOL[0] = vol
-                req("played", 0, "audio.play",
-                    {"url": stream_url(int(cid_s))})
-                CURRENT = {"id": int(cid_s), "title": title or f"频道 {cid_s}"}
+                LAST_VOL[0] = vol
+                start_play(int(cid_s), title, from_window=True)
 
             elif ev == "action:stop":
-                CURRENT = None
-                req("stopped", 0, "audio.stop", {})
+                stop_play(from_window=True)
 
             elif ev.startswith("action:fav:"):
                 payload = ev[len("action:fav:"):]

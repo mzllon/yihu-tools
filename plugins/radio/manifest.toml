@@ -1,6 +1,6 @@
 id = "radio"
 name = "电台"
-version = "1.0.0"
+version = "1.1.0"
 api = "^1"
 entry = "radio.py"
 icon = "applications-multimedia-symbolic"
