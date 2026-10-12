@@ -101,6 +101,98 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn passgen_wasm_generates() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let path = format!(
+            "{manifest}/../../plugins/passgen/wasm/target/wasm32-unknown-unknown/release/passgen_wasm.wasm"
+        );
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("跳过：passgen_wasm.wasm 未构建");
+            return;
+        }
+        let rows = run_cronkit_wasm(&path, "pass", 1_800_000_000).unwrap();
+        assert!(rows.len() == 3, "3 行，实际 {}", rows.len());
+        for r in &rows {
+            assert_eq!(r.0.len(), 16, "{}", r.0);
+            assert!(r.0.chars().any(|c| c.is_ascii_digit()), "{}", r.0);
+            assert!(r.0.chars().any(|c| "!@#$%^&*".contains(c)), "{}", r.0);
+        }
+        eprintln!("passgen.wasm ✓ 3×16 位");
+    }
+
+    #[test]
+    fn sqlfmt_wasm_formats() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let path = format!(
+            "{manifest}/../../plugins/sqlfmt/wasm/target/wasm32-unknown-unknown/release/sqlfmt_wasm.wasm"
+        );
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("跳过：sqlfmt_wasm.wasm 未构建");
+            return;
+        }
+        let rows = run_cronkit_wasm(
+            &path,
+            "fmt\x1fselect id, name from users where age > 18 and name like 'a%'",
+            1,
+        )
+        .unwrap();
+        let sql = &rows[0].2;
+        assert!(
+            sql.starts_with("SELECT id,\n  name\nFROM users\nWHERE age > 18\n  AND name LIKE"),
+            "{sql:?}"
+        );
+        let rows = run_cronkit_wasm(&path, "compact\x1fselect  a ,  b from t", 1).unwrap();
+        assert_eq!(rows[0].2, "select a, b from t");
+        eprintln!("sqlfmt.wasm ✓ 格式化+压缩");
+    }
+
+    #[test]
+    fn randgen_wasm_generates() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let path = format!(
+            "{manifest}/../../plugins/randgen/wasm/target/wasm32-unknown-unknown/release/randgen_wasm.wasm"
+        );
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("跳过：randgen_wasm.wasm 未构建");
+            return;
+        }
+        let rows = run_cronkit_wasm(&path, "rand 5-20", 1_800_000_000).unwrap();
+        assert!(rows.len() == 5, "5 行，实际 {}", rows.len());
+        for r in &rows {
+            let n: i64 = r.0.parse().unwrap_or(-1);
+            assert!((5..=20).contains(&n), "范围外：{}", r.0);
+        }
+        // uuid 直达
+        let rows = run_cronkit_wasm(&path, "uuid", 1_800_000_000).unwrap();
+        assert!(rows[0].0.len() == 36 && rows[0].0.as_bytes()[14] == b'4', "{}", rows[0].0);
+        eprintln!("randgen.wasm ✓ 范围+UUID");
+    }
+
+    #[test]
+    fn csvkit_wasm_converts() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let path = format!(
+            "{manifest}/../../plugins/csvkit/wasm/target/wasm32-unknown-unknown/release/csvkit_wasm.wasm"
+        );
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("跳过：csvkit_wasm.wasm 未构建");
+            return;
+        }
+        // csvkit 协议：mode \x1f delim \x1f header \x1f text
+        let query = "c2j\x1fauto\x1f1\x1fname,age\nalice,30\nbob,25";
+        let rows = run_cronkit_wasm(&path, query, 1_800_000_000).unwrap();
+        eprintln!("[csvkit-row] {}", rows[0].1);
+        assert!(rows[0].0.starts_with("✓ JSON"), "{}", rows[0].0);
+        assert!(rows[0].2.contains("\"alice\""), "{}", rows[0].2);
+        // 反向
+        let query2 = "j2c\x1fauto\x1f1\x1f[{\"name\":\"alice\",\"age\":\"30\"}]";
+        let rows = run_cronkit_wasm(&path, query2, 1_800_000_000).unwrap();
+        assert!(rows[0].0.starts_with("✓ CSV"), "{}", rows[0].0);
+        assert!(rows[0].2.contains("alice,30"), "{}", rows[0].2);
+        eprintln!("csvkit.wasm 双向转换 ✓");
+    }
+
+    #[test]
     fn cronkit_wasm_full_pipeline() {
         if !std::path::Path::new(&wasm()).exists() {
             eprintln!("跳过：cronkit_wasm.wasm 未构建");

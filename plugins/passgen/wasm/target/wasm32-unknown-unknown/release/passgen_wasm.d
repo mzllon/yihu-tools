@@ -1,0 +1,1 @@
+/home/ming-tang/Documents/Self/yihu-tools/plugins/passgen/wasm/target/wasm32-unknown-unknown/release/passgen_wasm.wasm: /home/ming-tang/Documents/Self/yihu-tools/crates/yihu-wasm-runtime/src/lib.rs /home/ming-tang/Documents/Self/yihu-tools/plugins/passgen/wasm/src/lib.rs

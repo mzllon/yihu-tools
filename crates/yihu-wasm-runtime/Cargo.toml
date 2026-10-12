@@ -1,0 +1,10 @@
+[package]
+name = "yihu-wasm-runtime"
+version = "0.1.0"
+edition = "2021"
+
+# WASM 插件侧运行时（插件 crate 引用，target=wasm32-unknown-unknown）：
+# 固定共享区 + 结果行存储 + query 入口样板。宿主协议见
+# tools/yihu-panel/src/wasm_plugin.rs（alloc/query/result_* 函数桥）。
+
+[workspace]

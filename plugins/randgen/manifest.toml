@@ -1,8 +1,8 @@
 id = "randgen"
 name = "随机数生成器"
-version = "0.1.0"
+version = "0.2.0-wasm"
 api = "^1"
-entry = "randgen"
+entry = "randgen.wasm"
 icon = "applications-games"
 
 [[triggers]]

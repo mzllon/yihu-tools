@@ -1,8 +1,8 @@
 id = "csvkit"
 name = "CSV ⇄ JSON"
-version = "0.1.0"
+version = "0.2.0-wasm"
 api = "^1"
-entry = "csvkit"
+entry = "csvkit.wasm"
 icon = "x-office-spreadsheet"
 
 [[triggers]]
