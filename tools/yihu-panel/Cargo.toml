@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "runtime"] }
 yihu-core = { path = "../../crates/yihu-core" }
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
 zbus = "4"

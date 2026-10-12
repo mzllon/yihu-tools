@@ -6,3 +6,4 @@ dist/
 .zcode/
 tools/sysdash/target/
 __pycache__/
+plugins/cronkit/wasm/target/

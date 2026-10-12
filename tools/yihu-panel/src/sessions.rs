@@ -96,6 +96,8 @@ pub struct PluginMgr {
     current_query: Option<(String, u64)>,
     /// 各插件对当前查询的最新结果（query_id, rows）；未超期的旧结果保留，避免闪烁
     latest: HashMap<String, (u64, Vec<PanelEntry>)>,
+    /// WASM 插件后端（entry 以 .wasm 结尾的插件；架构终版 §4，双轨之一）
+    wasm: crate::wasm_plugin::WasmRegistry,
     /// 选中文件上下文（SelectFiles 注入，收起即清）；query 时按
     /// manifest 权限（selected_files.read）转发给对应会话
     context_files: Vec<String>,
@@ -114,6 +116,7 @@ impl PluginMgr {
             gen: 0,
             current_query: None,
             latest: HashMap::new(),
+            wasm: crate::wasm_plugin::WasmRegistry::default(),
             context_files: Vec::new(),
         }
     }
@@ -160,6 +163,25 @@ impl PluginMgr {
                 eprintln!("yihu-panel: 插件 {id} 连续失败 {MAX_FAILURES} 次，本次运行期禁用");
                 self.disabled_by_failures.insert(id);
                 continue;
+            }
+            // WASM 插件（entry=.wasm）：不 spawn 进程，载入 wasmtime 注册表。
+            // 与 bwrap+stdio 双轨并存（架构终版 §4）。
+            if inst.manifest.entry.ends_with(".wasm") {
+                let entry_path = inst.entry_path();
+                match self.wasm.ensure_loaded(&id, &entry_path) {
+                    Ok(true) => {
+                        if debug {
+                            eprintln!("yihu-panel: WASM 插件已加载 {id}");
+                        }
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        eprintln!("yihu-panel: WASM 插件 {id} 加载失败：{e}");
+                        self.record_failure(&id);
+                        continue;
+                    }
+                }
             }
             match self.spawn_session(&inst, debug, data_root) {
                 Ok(sess) => {
@@ -355,6 +377,24 @@ impl PluginMgr {
             self.sessions.retain(|s| s.id != id);
             self.latest.remove(&id);
         }
+        // WASM 插件路由（双轨之二）：同步调用（~0.2ms），结果直接入 latest。
+        // 只认本插件词头时返回空列表，不占面板行。
+        for (wid, rows) in self.wasm.broadcast(text) {
+            if rows.is_empty() {
+                continue;
+            }
+            let entries: Vec<PanelEntry> = rows
+                .into_iter()
+                .map(|r| PanelEntry {
+                    title: r.title,
+                    subtitle: r.subtitle,
+                    icon_spec: "text-x-script".into(),
+                    kind: "plugin",
+                    payload: format!("{wid}|{}", r.payload),
+                })
+                .collect();
+            self.latest.insert(wid, (id, entries));
+        }
     }
 
     /// 用户显式停止指定插件：SIGKILL 进程组并移除会话，
@@ -381,7 +421,7 @@ impl PluginMgr {
 
     /// 指定插件是否还有存活会话（播放属主死亡检查用）
     pub fn has_session(&self, id: &str) -> bool {
-        self.sessions.iter().any(|s| s.id == id)
+        self.sessions.iter().any(|s| s.id == id) || self.wasm.is_loaded(id)
     }
 
     /// 收起时调用：进程组级 SIGKILL 杀灭非常驻会话；常驻会话保留

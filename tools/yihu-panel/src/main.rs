@@ -17,6 +17,7 @@ mod sandbox;
 mod screenshot;
 mod sessions;
 mod status;
+mod wasm_plugin;
 mod ui;
 mod theme;
 mod service;
