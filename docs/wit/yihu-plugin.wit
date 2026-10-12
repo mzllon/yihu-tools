@@ -1,0 +1,48 @@
+package yihu:plugin@1.0.0;
+
+/// 结果行（面板列表展示 + 回车复制/激活）
+record result-item {
+    title: string,
+    subtitle: string,
+    /// 以 "!" 开头 = 动作型（宿主不复制，转发 activate）
+    payload: string,
+    icon: option<string>,
+}
+
+/// UI 模板 spec 的字段（ui.show v2 词汇表的类型化子集）
+record ui-field {
+    key: string,
+    /// text | textarea | select | switch | number | hotkey | app_select
+    kind: string,
+    label: string,
+    placeholder: option<string>,
+    value: option<string>,
+    min: option<f64>,
+    max: option<f64>,
+}
+
+/// 宿主能力导入（manifest permissions 决定哪些可被调用）
+interface host {
+    /// 面板列表展示结果
+    show-results: func(query-id: u64, items: list<result-item>);
+    /// 打开模板表单
+    show-ui: func(ui-id: u64, title: string, fields: list<ui-field>,
+                  actions: list<string>);
+    /// 剪贴板
+    clipboard-read: func() -> result<string, string>;
+    clipboard-write: func(text: string) -> result<_, string>;
+    /// 网络（manifest network.fetch@host 声明 host 白名单）
+    network-fetch: func(url: string) -> result<string, string>;
+    /// 通知
+    notify: func(summary: string, body: string);
+    /// 日志（宿主 stderr + 审计）
+    log: func(msg: string);
+}
+
+world plugin {
+    import host;
+    /// 查询入口（面板每次击键广播；插件自认词头，不匹配返回空列表）
+    export query: func(text: string) -> list<result-item>;
+    /// 结果行激活（! 前缀 payload 剥掉后传入）
+    export activate: func(payload: string);
+}

@@ -54,7 +54,7 @@ pub fn spike_capability_bridge(
                 let mem = caller
                     .get_export("memory")
                     .and_then(|e| e.into_memory())
-                    .ok_or("WASM 无 memory 导出")?;
+                    .ok_or_else(|| wasmtime::Error::msg("WASM 无 memory 导出"))?;
                 let mut buf = vec![0u8; len as usize];
                 mem.read(&caller, ptr as usize, &mut buf)?;
                 let text = String::from_utf8_lossy(&buf).to_string();
@@ -84,7 +84,7 @@ pub fn spike_capability_bridge(
             let mem = caller
                 .get_export("memory")
                 .and_then(|e| e.into_memory())
-                .ok_or("WASM 无 memory 导出")?;
+                .ok_or_else(|| wasmtime::Error::msg("WASM 无 memory 导出"))?;
             let mut buf = vec![0u8; len as usize];
             mem.read(&caller, ptr as usize, &mut buf)?;
             caller.data_mut().calls.push(format!("log: {}", String::from_utf8_lossy(&buf)));
@@ -103,7 +103,7 @@ pub fn spike_capability_bridge(
     // 把查询文本写入 WASM 内存
     let memory = instance
         .get_memory(&mut store, "memory")
-        .ok_or("WASM 无 memory")?;
+        .ok_or_else(|| "WASM 无 memory".to_string())?;
     let alloc = instance
         .get_typed_func::<i32, i32>(&mut store, "alloc")
         .map_err(|e| format!("找不到 alloc：{e}"))?;

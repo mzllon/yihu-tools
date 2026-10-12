@@ -8,6 +8,9 @@
 //!
 //! 结论写回 docs/插件运行时架构.md 的 W1 段。
 
+pub mod cap;
+pub mod integration;
+
 use std::time::Instant;
 use wasmtime::{Engine, Linker, Module, Store};
 
