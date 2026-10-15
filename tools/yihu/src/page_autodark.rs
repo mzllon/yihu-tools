@@ -4,12 +4,11 @@
 //! 定时器；实际切换由无 UI 的 `autodark-agent` 每分钟执行。
 //!
 //! 视觉语言：主卡（开关 + 三列状态摘要 + 应用按钮）+ 双模式选中卡
-//!（整卡可点，选中态强调色描边）；时间选择用紧凑下拉。
+//!（整卡可点，选中态强调色描边）；时间直接键入（等宽紧凑输入框，支持多种写法）。
 
 use adw::prelude::*;
 use gtk::{
-    Align, Box as GtkBox, Button, CheckButton, DropDown, Entry, Label, Orientation,
-    StringList, Switch,
+    Align, Box as GtkBox, Button, CheckButton, Entry, Label, Orientation, Switch,
 };
 use gtk::glib;
 use std::fs;
@@ -34,10 +33,8 @@ struct Ui {
     rb_sun: CheckButton,
     card_custom: GtkBox,
     card_sun: GtkBox,
-    light_h: DropDown,
-    light_m: DropDown,
-    dark_h: DropDown,
-    dark_m: DropDown,
+    dark_start_entry: Entry,
+    dark_end_entry: Entry,
     lat_entry: Entry,
     lon_entry: Entry,
     sun_info: Label,
@@ -46,38 +43,42 @@ struct Ui {
     timer_state: Label,
 }
 
-const HOURS: &[&str] = &[
-    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14",
-    "15", "16", "17", "18", "19", "20", "21", "22", "23",
-];
-const MINUTES: &[&str] = &["00", "05", "10", "15", "20", "25", "30", "35", "40", "45", "50", "55"];
-
-fn hm_dropdown(items: &[&str], value: u32) -> DropDown {
-    let d = DropDown::new(Some(StringList::new(items)), None::<&gtk::Expression>);
-    let idx = items
-        .iter()
-        .position(|s| s.parse::<u32>().ok() == Some(value))
-        .unwrap_or(0);
-    d.set_selected(idx as u32);
-    d.add_css_class("hm-drop");
-    d
+/// 解析时间输入，支持多种写法：`21:00`、`9:30`、`1730`、`730`、`21`、`7`。
+/// 解析不出或越界（时 >23 / 分 >59）返回 None，此时不落盘、保留上次有效值。
+fn parse_time(s: &str) -> Option<(u32, u32)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (h, m) = match s.split_once(':') {
+        Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?),
+        None => match s.parse::<u32>() {
+            // 纯数字：1-2 位视为小时，3 位 HMM，4 位 HHMM
+            Ok(n) => match n {
+                0..=99 => (n, 0),
+                100..=959 => (n / 100, n % 100),
+                1000..=2359 => (n / 100, n % 100),
+                _ => return None,
+            },
+            Err(_) => return None,
+        },
+    };
+    (h <= 23 && m <= 59).then_some((h, m))
 }
 
-fn dropdown_value(d: &DropDown) -> u32 {
-    // 两个列表都是纯数字字符串，直接解析选中项文本
-    d.selected_item()
-        .and_downcast::<gtk::StringObject>()
-        .map(|o| o.string().parse::<u32>().unwrap_or(0))
-        .unwrap_or(0)
+fn fmt_tm(t: (u32, u32)) -> String {
+    format!("{:02}:{:02}", t.0, t.1)
 }
 
 impl Ui {
     fn collect(&self) -> Config {
+        // 输入未完成/非法时不采纳新值：回退到磁盘上的最后一次有效配置
+        let disk = Config::load();
         let mut c = Config {
             enabled: self.enable_switch.is_active(),
             mode: if self.rb_sun.is_active() { Mode::Sun } else { Mode::Custom },
-            light_time: (dropdown_value(&self.light_h), dropdown_value(&self.light_m)),
-            dark_time: (dropdown_value(&self.dark_h), dropdown_value(&self.dark_m)),
+            dark_start: parse_time(&self.dark_start_entry.text()).unwrap_or(disk.dark_start),
+            dark_end: parse_time(&self.dark_end_entry.text()).unwrap_or(disk.dark_end),
             latitude: self.lat_entry.text().parse().unwrap_or(30.66),
             longitude: self.lon_entry.text().parse().unwrap_or(104.06),
         };
@@ -206,27 +207,32 @@ pub fn build_page() -> gtk::Widget {
     }
 
     // —— 自定义时间卡 ——
-    let card_custom = mode_card(&rb_custom, "固定时刻切换浅色 / 深色主题");
+    let card_custom = mode_card(&rb_custom, "每天只在深色时段用深色主题，其余自动浅色");
     let time_grid = GtkBox::new(Orientation::Vertical, 8);
-    let mk_row = |label: &str, h: DropDown, m: DropDown| {
-        let r = GtkBox::new(Orientation::Horizontal, 8);
-        let l = Label::new(Some(label));
+    let dark_start_entry = Entry::new();
+    dark_start_entry.set_text(&fmt_tm(cfg.dark_start));
+    dark_start_entry.add_css_class("hm-entry");
+    let dark_end_entry = Entry::new();
+    dark_end_entry.set_text(&fmt_tm(cfg.dark_end));
+    dark_end_entry.add_css_class("hm-entry");
+    let period_row = GtkBox::new(Orientation::Horizontal, 8);
+    let pl = Label::new(Some("深色时段"));
+    pl.set_valign(Align::Center);
+    period_row.append(&pl);
+    period_row.append(&dark_start_entry);
+    let sep = |s: &str| {
+        let l = Label::new(Some(s));
         l.set_valign(Align::Center);
-        l.set_width_chars(3);
-        r.append(&l);
-        r.append(&h);
-        let colon = Label::new(Some("∶"));
-        colon.set_valign(Align::Center);
-        r.append(&colon);
-        r.append(&m);
-        r
+        l
     };
-    let light_h = hm_dropdown(HOURS, cfg.light_time.0);
-    let light_m = hm_dropdown(MINUTES, cfg.light_time.1);
-    let dark_h = hm_dropdown(HOURS, cfg.dark_time.0);
-    let dark_m = hm_dropdown(MINUTES, cfg.dark_time.1);
-    time_grid.append(&mk_row("浅色", light_h.clone(), light_m.clone()));
-    time_grid.append(&mk_row("深色", dark_h.clone(), dark_m.clone()));
+    period_row.append(&sep("→"));
+    period_row.append(&dark_end_entry);
+    time_grid.append(&period_row);
+    let period_hint = Label::new(Some("可直接键入，如 1730、9:30、21；结束早于开始表示跨零点"));
+    period_hint.add_css_class("caption-sm");
+    period_hint.add_css_class("dim-label");
+    period_hint.set_halign(Align::Start);
+    time_grid.append(&period_hint);
     time_grid.set_margin_top(10);
     time_grid.set_margin_start(26);
     card_custom.append(&time_grid);
@@ -283,10 +289,8 @@ pub fn build_page() -> gtk::Widget {
         rb_sun: rb_sun.clone(),
         card_custom: card_custom.clone(),
         card_sun: card_sun.clone(),
-        light_h,
-        light_m,
-        dark_h,
-        dark_m,
+        dark_start_entry,
+        dark_end_entry,
         lat_entry,
         lon_entry,
         sun_info,
@@ -324,23 +328,42 @@ pub fn build_page() -> gtk::Widget {
             ui_c.refresh();
         });
     }
-    // 整卡可点：点击卡片任意处切到该模式
+    // 整卡可点：点击卡片任意处切到该模式。不能 claim 序列——按下即抢占会把
+    // 卡片内 DropDown/Entry 尚在识别中的子手势一并取消，时间下拉从此点不开（BUG-003）。
     for (card, rb) in [(&ui.card_custom, &ui.rb_custom), (&ui.card_sun, &ui.rb_sun)] {
         let rb = rb.clone();
         let gesture = gtk::GestureClick::new();
-        gesture.connect_pressed(move |g, _, _, _| {
+        gesture.connect_pressed(move |_, _, _, _| {
             rb.set_active(true);
-            g.set_state(gtk::EventSequenceState::Claimed);
         });
         card.add_controller(gesture);
     }
-    for d in [&ui.light_h, &ui.light_m, &ui.dark_h, &ui.dark_m] {
+    // 时间框：合法输入即时保存；失焦把任意写法归一成 HH:MM；进框全选便于直接键入
+    for entry in [&ui.dark_start_entry, &ui.dark_end_entry] {
         let ui_c = ui.clone();
-        d.connect_selected_notify(move |_| {
+        entry.connect_changed(move |_| {
             ui_c.save();
             ui_c.refresh();
         });
     }
+    let wire_time = |entry: &Entry, pick: Box<dyn Fn(&Config) -> (u32, u32)>| {
+        let fc = gtk::EventControllerFocus::new();
+        let ui_c = ui.clone();
+        let e = entry.clone();
+        fc.connect_leave(move |_| {
+            let want = fmt_tm(pick(&ui_c.collect()));
+            if e.text() != want {
+                e.set_text(&want);
+            }
+        });
+        let e2 = entry.clone();
+        fc.connect_enter(move |_| {
+            e2.select_region(0, -1);
+        });
+        entry.add_controller(fc);
+    };
+    wire_time(&ui.dark_start_entry, Box::new(|c| c.dark_start));
+    wire_time(&ui.dark_end_entry, Box::new(|c| c.dark_end));
     for entry in [&ui.lat_entry, &ui.lon_entry] {
         let ui_c = ui.clone();
         entry.connect_changed(move |_| {
@@ -492,5 +515,29 @@ fn fmt_dur(mins: i64) -> String {
         (0, m) => format!("{m} 分钟后"),
         (h, 0) => format!("{h} 小时后"),
         (h, m) => format!("{h} 小时 {m} 分后"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_time;
+
+    #[test]
+    fn parse_time_formats() {
+        // 带冒号 / 纯数字 / 带空白等各种写法
+        assert_eq!(parse_time("21:00"), Some((21, 0)));
+        assert_eq!(parse_time("9:30"), Some((9, 30)));
+        assert_eq!(parse_time("1730"), Some((17, 30)));
+        assert_eq!(parse_time("730"), Some((7, 30)));
+        assert_eq!(parse_time("21"), Some((21, 0)));
+        assert_eq!(parse_time(" 7 "), Some((7, 0)));
+        assert_eq!(parse_time("0"), Some((0, 0)));
+        // 非法输入一律 None：越界、残缺、垃圾字符
+        assert_eq!(parse_time("24:00"), None);
+        assert_eq!(parse_time("7:60"), None);
+        assert_eq!(parse_time("173"), None);
+        assert_eq!(parse_time("17300"), None);
+        assert_eq!(parse_time("abc"), None);
+        assert_eq!(parse_time(""), None);
     }
 }

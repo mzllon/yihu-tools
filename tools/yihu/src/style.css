@@ -50,11 +50,9 @@
   margin: 0;
 }
 
-/* 时间下拉：紧凑等宽数字 */
-dropdown.hm-drop {
-  min-width: 64px;
-}
-dropdown.hm-drop > button {
+/* 时间输入框：紧凑等宽数字，可直接键入 */
+entry.hm-entry {
+  min-width: 76px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }

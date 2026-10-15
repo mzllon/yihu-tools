@@ -39,10 +39,10 @@ impl Theme {
 pub struct Config {
     pub enabled: bool,
     pub mode: Mode,
-    /// 进入浅色模式的时刻（时, 分）
-    pub light_time: (u32, u32),
-    /// 进入深色模式的时刻
-    pub dark_time: (u32, u32),
+    /// 深色时段开始时刻（时, 分）
+    pub dark_start: (u32, u32),
+    /// 深色时段结束时刻；start > end 表示时段跨零点，时段之外一律浅色
+    pub dark_end: (u32, u32),
     pub latitude: f64,
     pub longitude: f64,
 }
@@ -52,8 +52,8 @@ impl Default for Config {
         Config {
             enabled: false,
             mode: Mode::Custom,
-            light_time: (7, 0),
-            dark_time: (20, 0),
+            dark_start: (20, 0),
+            dark_end: (7, 0),
             latitude: 30.66,
             longitude: 104.06,
         }
@@ -79,6 +79,8 @@ impl Config {
 
     fn read_text(text: &str) -> io::Result<Config> {
         let mut c = Config::default();
+        let mut seen_start = false;
+        let mut seen_end = false;
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
             let Some((k, v)) = line.split_once('=') else {
@@ -88,8 +90,11 @@ impl Config {
             match k {
                 "enabled" => c.enabled = v == "true",
                 "mode" => c.mode = if v == "sun" { Mode::Sun } else { Mode::Custom },
-                "light_time" => if let Some(t) = parse_hm(v) { c.light_time = t },
-                "dark_time" => if let Some(t) = parse_hm(v) { c.dark_time = t },
+                "dark_start" => if let Some(t) = parse_hm(v) { c.dark_start = t; seen_start = true },
+                "dark_end" => if let Some(t) = parse_hm(v) { c.dark_end = t; seen_end = true },
+                // 旧版键（light_time/dark_time 两个独立切换点）映射为深色时段
+                "dark_time" => if !seen_start { if let Some(t) = parse_hm(v) { c.dark_start = t } },
+                "light_time" => if !seen_end { if let Some(t) = parse_hm(v) { c.dark_end = t } },
                 "latitude" => if let Ok(f) = v.parse::<f64>() { c.latitude = f.clamp(-89.0, 89.0) },
                 "longitude" => if let Ok(f) = v.parse::<f64>() { c.longitude = f.clamp(-180.0, 180.0) },
                 _ => {}
@@ -99,50 +104,16 @@ impl Config {
     }
 
     pub fn read_from(path: &Path) -> io::Result<Config> {
-        let text = fs::read_to_string(path)?;
-        let mut c = Config::default();
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            let Some((k, v)) = line.split_once('=') else {
-                continue;
-            };
-            let (k, v) = (k.trim(), v.trim());
-            match k {
-                "enabled" => c.enabled = v == "true",
-                "mode" => c.mode = if v == "sun" { Mode::Sun } else { Mode::Custom },
-                "light_time" => {
-                    if let Some(t) = parse_hm(v) {
-                        c.light_time = t;
-                    }
-                }
-                "dark_time" => {
-                    if let Some(t) = parse_hm(v) {
-                        c.dark_time = t;
-                    }
-                }
-                "latitude" => {
-                    if let Ok(f) = v.parse::<f64>() {
-                        c.latitude = f.clamp(-89.0, 89.0);
-                    }
-                }
-                "longitude" => {
-                    if let Ok(f) = v.parse::<f64>() {
-                        c.longitude = f.clamp(-180.0, 180.0);
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(c)
+        Self::read_text(&fs::read_to_string(path)?)
     }
 
     pub fn to_text(&self) -> String {
         format!(
-            "# 一呼 AutoDark 配置\n\
+            "# 一呼 AutoDark 配置（深色时段之外自动使用浅色；结束 < 开始表示跨零点）\n\
              enabled = {}\n\
              mode = {}\n\
-             light_time = {:02}:{:02}\n\
-             dark_time = {:02}:{:02}\n\
+             dark_start = {:02}:{:02}\n\
+             dark_end = {:02}:{:02}\n\
              latitude = {:.4}\n\
              longitude = {:.4}\n",
             self.enabled,
@@ -150,10 +121,10 @@ impl Config {
                 Mode::Custom => "custom",
                 Mode::Sun => "sun",
             },
-            self.light_time.0,
-            self.light_time.1,
-            self.dark_time.0,
-            self.dark_time.1,
+            self.dark_start.0,
+            self.dark_start.1,
+            self.dark_end.0,
+            self.dark_end.1,
             self.latitude,
             self.longitude
         )
@@ -235,18 +206,19 @@ pub fn desired_theme(cfg: &Config, now: &LocalTime) -> Theme {
     }
 }
 
+/// 深色时段 [start, end) 内为深色，其余一律浅色；start == end 视为无深色时段。
 fn custom_theme(cfg: &Config, now_h: f64) -> Theme {
-    let (l, d) = (hm_f(cfg.light_time), hm_f(cfg.dark_time));
-    if l == d {
+    let (s, e) = (hm_f(cfg.dark_start), hm_f(cfg.dark_end));
+    if s == e {
         return Theme::Light;
     }
-    if l < d {
-        if (l..d).contains(&now_h) { Theme::Light } else { Theme::Dark }
-    } else if now_h >= l || now_h < d {
-        Theme::Light
+    let in_dark = if s < e {
+        (s..e).contains(&now_h)
     } else {
-        Theme::Dark
-    }
+        // 跨零点：如 17:00 → 次日 07:00
+        now_h >= s || now_h < e
+    };
+    if in_dark { Theme::Dark } else { Theme::Light }
 }
 
 /// 下一次主题切换：(当天小时数, 切换后的主题)。
@@ -254,7 +226,7 @@ fn custom_theme(cfg: &Config, now_h: f64) -> Theme {
 pub fn next_transition(cfg: &Config, now: &LocalTime) -> Option<(f64, Theme)> {
     let events = |y: i32, m: u32, d: u32| -> Vec<(f64, Theme)> {
         match cfg.mode {
-            Mode::Custom => vec![(hm_f(cfg.light_time), Theme::Light), (hm_f(cfg.dark_time), Theme::Dark)],
+            Mode::Custom => vec![(hm_f(cfg.dark_start), Theme::Dark), (hm_f(cfg.dark_end), Theme::Light)],
             Mode::Sun => sun::sun_times(y, m, d, cfg.latitude, cfg.longitude, now.utc_offset_hours)
                 .map(|(r, s)| vec![(r, Theme::Light), (s, Theme::Dark)])
                 .unwrap_or_default(),
@@ -331,16 +303,36 @@ mod tests {
 
     #[test]
     fn custom_mode_basic_and_wrap() {
-        let c = Config { light_time: (7, 0), dark_time: (20, 0), ..Config::default() };
+        // 深色时段 20:00 → 次日 07:00（跨零点）
+        let c = Config { dark_start: (20, 0), dark_end: (7, 0), ..Config::default() };
         assert_eq!(custom_theme(&c, 6.99), Theme::Dark);
         assert_eq!(custom_theme(&c, 7.0), Theme::Light);
         assert_eq!(custom_theme(&c, 12.0), Theme::Light);
         assert_eq!(custom_theme(&c, 20.0), Theme::Dark);
-        // 跨零点：浅色 22:00 → 次日 6:00（浅色区间跨午夜）
-        let c2 = Config { light_time: (22, 0), dark_time: (6, 0), ..Config::default() };
+        // 深色时段 06:00 → 22:00（当天内）
+        let c2 = Config { dark_start: (6, 0), dark_end: (22, 0), ..Config::default() };
         assert_eq!(custom_theme(&c2, 1.0), Theme::Light);
         assert_eq!(custom_theme(&c2, 12.0), Theme::Dark);
         assert_eq!(custom_theme(&c2, 23.0), Theme::Light);
+        // 起止相同：视为无深色时段，恒为浅色
+        let c3 = Config { dark_start: (8, 0), dark_end: (8, 0), ..Config::default() };
+        assert_eq!(custom_theme(&c3, 8.0), Theme::Light);
+        assert_eq!(custom_theme(&c3, 23.0), Theme::Light);
+    }
+
+    #[test]
+    fn legacy_config_maps_to_dark_window() {
+        // 旧版两个切换点（dark 20:05 进入深色 / light 07:30 进入浅色）
+        // ⇒ 深色时段 20:05 → 07:30
+        let legacy = "enabled = true\nmode = custom\nlight_time = 07:30\ndark_time = 20:05\n";
+        let c = Config::read_text(legacy).unwrap();
+        assert_eq!(c.dark_start, (20, 5));
+        assert_eq!(c.dark_end, (7, 30));
+        // 新旧键同时出现时以新键为准
+        let mixed = "dark_start = 21:00\ndark_time = 20:05\nlight_time = 06:00\n";
+        let c2 = Config::read_text(mixed).unwrap();
+        assert_eq!(c2.dark_start, (21, 0));
+        assert_eq!(c2.dark_end, (6, 0));
     }
 
     #[test]
@@ -348,8 +340,8 @@ mod tests {
         let c = Config {
             enabled: true,
             mode: Mode::Sun,
-            light_time: (7, 30),
-            dark_time: (20, 5),
+            dark_start: (20, 5),
+            dark_end: (7, 30),
             latitude: 39.9042,
             longitude: 116.4074,
         };
@@ -361,15 +353,16 @@ mod tests {
         let c2 = Config::read_from(&p).unwrap();
         assert_eq!(c2.enabled, c.enabled);
         assert_eq!(c2.mode, Mode::Sun);
-        assert_eq!(c2.light_time, (7, 30));
-        assert_eq!(c2.dark_time, (20, 5));
+        assert_eq!(c2.dark_start, (20, 5));
+        assert_eq!(c2.dark_end, (7, 30));
         assert!((c2.latitude - c.latitude).abs() < 1e-6);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn next_transition_orders_events() {
-        let c = Config { light_time: (7, 0), dark_time: (20, 0), ..Config::default() };
+        // 深色时段 20:00 → 次日 07:00
+        let c = Config { dark_start: (20, 0), dark_end: (7, 0), ..Config::default() };
         // 12:00 → 下一次是 20:00 切深色
         let (t, th) = next_transition(&c, &tm(12.0)).unwrap();
         assert!((t - 20.0).abs() < 1e-6 && th == Theme::Dark);
