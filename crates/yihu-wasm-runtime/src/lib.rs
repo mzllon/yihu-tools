@@ -25,6 +25,8 @@
 /// 共享区容量（1 MiB；插件查询文本+结果字符串远小于此）
 const HEAP_CAP: usize = 1 << 20;
 
+pub mod cap;
+
 /// 结果行
 pub struct Row {
     pub title: String,
@@ -70,6 +72,40 @@ pub trait QueryHandler {
         Self: Sized;
 }
 
+/// 完整插件处理函数：查询 + 可选的激活/能力回包/UI 事件。
+/// 旧式 `QueryHandler` 经毯子实现自动成为 `PluginHandler`（激活等
+/// 全部为空实现），新插件按需覆写即可。
+pub trait PluginHandler {
+    fn handle(text: &str, now_secs: i64) -> Vec<Row>
+    where
+        Self: Sized;
+    /// 结果行被用户激活（payload = 结果行第三字段）
+    fn activate(_payload: &str) {}
+    /// 能力执行回包（data 为宿主写入共享区的载荷，JSON 或原始文本）
+    fn on_response(_id: i32, _ok: bool, _data: &[u8]) {}
+    /// ui.show 表单的 submit/cancel 事件（JSON）
+    fn on_ui_event(_json: &str) {}
+}
+
+impl<T: QueryHandler> PluginHandler for T {
+    fn handle(text: &str, now_secs: i64) -> Vec<Row> {
+        <T as QueryHandler>::handle(text, now_secs)
+    }
+}
+
+/// 从共享区绝对地址读回字符串（宿主写入的协议约定；宏使用）
+#[doc(hidden)]
+pub fn read_abs(ptr_abs: i32, len: i32) -> String {
+    unsafe {
+        let base = &raw const __HEAP as usize;
+        let ptr = ptr_abs as i64 - base as i64;
+        if ptr < 0 || len < 0 || (ptr as usize + len as usize) > __HEAP.len() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&__HEAP[ptr as usize..ptr as usize + len as usize]).to_string()
+    }
+}
+
 #[macro_export]
 macro_rules! export_plugin {
     ($ty:ty) => {
@@ -92,7 +128,7 @@ macro_rules! export_plugin {
                 .to_string();
                 $crate::__rows_clear();
                 let rows = std::panic::catch_unwind(|| {
-                    <$ty as $crate::QueryHandler>::handle(&text, now_secs)
+                    <$ty as $crate::PluginHandler>::handle(&text, now_secs)
                 })
                 .unwrap_or_else(|p| {
                     let msg = p
@@ -105,6 +141,36 @@ macro_rules! export_plugin {
                 $crate::__rows_store(rows);
                 0
             }
+        }
+
+        /// 结果行激活（W4）：宿主在用户回车时调用
+        #[no_mangle]
+        pub extern "C" fn activate(ptr_abs: i32, len: i32) -> i32 {
+            let payload = $crate::read_abs(ptr_abs, len);
+            let _ = std::panic::catch_unwind(|| {
+                <$ty as $crate::PluginHandler>::activate(&payload)
+            });
+            0
+        }
+
+        /// 能力执行回包（W4）：ok != 0 为成功；data 在共享区
+        #[no_mangle]
+        pub extern "C" fn on_response(id: i32, ok: i32, ptr_abs: i32, len: i32) -> i32 {
+            let data = $crate::read_abs(ptr_abs, len);
+            let _ = std::panic::catch_unwind(|| {
+                <$ty as $crate::PluginHandler>::on_response(id, ok != 0, data.as_bytes())
+            });
+            0
+        }
+
+        /// ui.show 表单事件（W4）：JSON 载荷
+        #[no_mangle]
+        pub extern "C" fn on_ui_event(ptr_abs: i32, len: i32) -> i32 {
+            let json = $crate::read_abs(ptr_abs, len);
+            let _ = std::panic::catch_unwind(|| {
+                <$ty as $crate::PluginHandler>::on_ui_event(&json)
+            });
+            0
         }
     };
 }

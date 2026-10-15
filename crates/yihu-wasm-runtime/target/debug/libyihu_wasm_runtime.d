@@ -1,0 +1,1 @@
+/home/ming-tang/Documents/Self/yihu-tools/crates/yihu-wasm-runtime/target/debug/libyihu_wasm_runtime.rlib: /home/ming-tang/Documents/Self/yihu-tools/crates/yihu-wasm-runtime/src/cap.rs /home/ming-tang/Documents/Self/yihu-tools/crates/yihu-wasm-runtime/src/lib.rs

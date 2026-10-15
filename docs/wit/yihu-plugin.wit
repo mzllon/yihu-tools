@@ -21,28 +21,67 @@ record ui-field {
     max: option<f64>,
 }
 
-/// 宿主能力导入（manifest permissions 决定哪些可被调用）
+/// 宿主能力导入（manifest permissions 决定哪些可被调用）。
+///
+/// W4 落地说明：这是**文档层**的意图模型。生产运行时（Linker 函数桥）
+/// 用统一 7 参签名 `(id, p1ptr, p1len, p2ptr, p2len, p3ptr, p3len) -> i32`
+/// 承载下述全部能力——每个能力一个 kebab 名导入（如 `yihu.settings-write`），
+/// 参数按位填 p1/p2/p3；调用即入队（异步），结果经插件的 `on_response`
+/// 导出回传。component model 化列 Stage 3（跨平台路线）。
+/// manifest permissions = import 白名单，宿主装载期校验（未声明即拒载）。
 interface host {
     /// 面板列表展示结果
     show-results: func(query-id: u64, items: list<result-item>);
-    /// 打开模板表单
+    /// 打开模板表单（submit/cancel 经 on-ui-event 回传）
     show-ui: func(ui-id: u64, title: string, fields: list<ui-field>,
                   actions: list<string>);
-    /// 剪贴板
+    /// 剪贴板（read 结果经 on_response.data 回传）
     clipboard-read: func() -> result<string, string>;
     clipboard-write: func(text: string) -> result<_, string>;
     /// 网络（manifest network.fetch@host 声明 host 白名单）
     network-fetch: func(url: string) -> result<string, string>;
     /// 通知
     notify: func(summary: string, body: string);
-    /// 日志（宿主 stderr + 审计）
+    /// 选区/全屏截图（宿主持 portal 授权；mode = full/area）
+    screenshot-take: func(mode: string, clipboard: bool) -> result<string, string>;
+    /// gsettings（schema ∈ 声明集；reset 无 value）
+    settings-write: func(schema: string, key: string, value: string) -> result<_, string>;
+    settings-reset: func(schema: string, key: string) -> result<_, string>;
+    settings-read: func(schema: string, key: string) -> result<string, string>;
+    /// 文件（路径须命中 manifest fs.* glob；UTF-8 文本）
+    fs-write: func(path: string, text: string) -> result<_, string>;
+    fs-read: func(path: string) -> result<string, string>;
+    /// 音频（url host ∈ 声明集；播放宿主代执行单流）
+    audio-play: func(url: string) -> result<_, string>;
+    audio-stop: func();
+    audio-volume: func(pct: u8) -> result<_, string>;
+    /// 二维码（decode 用剪贴板图片）
+    qr-generate: func(text: string) -> result<_, string>;
+    qr-decode: func() -> result<string, string>;
+    /// Markdown（mode = preview/html；html 模式结果经 on_response 回传）
+    md-render: func(mode: string, text: string) -> result<string, string>;
+    md-view: func(title: string, text: string) -> result<_, string>;
+    /// 便签（id 寻址，内容文件 = 插件数据目录 stickies/<id>.md）
+    sticky-pin: func(id: string) -> result<_, string>;
+    sticky-close: func(id: string) -> result<_, string>;
+    /// 打开 URI（scheme 白名单 http/https/mailto）
+    open-uri: func(uri: string) -> result<_, string>;
+    /// 启动本机应用（desktop 文件 id）
+    launch-app: func(desktop-id: string) -> result<_, string>;
+    /// 选中文件上下文（query 携带，插件无从主动请求）
+    selected-files-read: func() -> list<string>;
+    /// 日志（YIHU_PANEL_DEBUG=1 时输出宿主 stderr）
     log: func(msg: string);
 }
 
 world plugin {
     import host;
     /// 查询入口（面板每次击键广播；插件自认词头，不匹配返回空列表）
-    export query: func(text: string) -> list<result-item>;
+    export query: func(text: string, now: u64) -> list<result-item>;
     /// 结果行激活（! 前缀 payload 剥掉后传入）
     export activate: func(payload: string);
+    /// 能力执行回包（id 关联；data 为 JSON 或原始文本）
+    export on-response: func(id: u64, ok: bool, data: string);
+    /// ui.show 表单事件（submit/cancel + 表单值）
+    export on-ui-event: func(event: string);
 }

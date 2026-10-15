@@ -165,10 +165,11 @@ impl PluginMgr {
                 continue;
             }
             // WASM 插件（entry=.wasm）：不 spawn 进程，载入 wasmtime 注册表。
-            // 与 bwrap+stdio 双轨并存（架构终版 §4）。
+            // 与 bwrap+stdio 双轨并存（架构终版 §4）。manifest permissions
+            // 随实例带上：装载期能力校验 + 请求期授权的依据。
             if inst.manifest.entry.ends_with(".wasm") {
                 let entry_path = inst.entry_path();
-                match self.wasm.ensure_loaded(&id, &entry_path) {
+                match self.wasm.ensure_loaded(&id, &entry_path, &inst.manifest.permissions) {
                     Ok(true) => {
                         if debug {
                             eprintln!("yihu-panel: WASM 插件已加载 {id}");
@@ -329,6 +330,35 @@ impl PluginMgr {
         self.context_files = files;
     }
 
+    /// 能力执行回包路由：WASM 插件经 on_response 导出回传，stdio 会话写
+    /// capability_response。异步执行器（spawn_*_job）与同步路径统一走这里，
+    /// 执行器本身不感知传输轨。
+    pub fn route_cap_response(
+        &mut self,
+        plugin: &str,
+        gen: u64,
+        request_id: u64,
+        ok: bool,
+        error: &str,
+        data: Option<&str>,
+    ) {
+        if self.wasm.is_loaded(plugin) {
+            if let Some(Err(e)) = self.wasm.deliver_response(plugin, request_id, ok, error, data) {
+                eprintln!("yihu-panel: WASM 插件 {plugin} 回包失败：{e}");
+            }
+            return;
+        }
+        self.respond_gen(plugin, gen, request_id, ok, error, data);
+    }
+
+    /// 解析插件的 manifest 声明权限：stdio 按会话代数，WASM 查注册表。
+    pub fn permissions_for(&self, plugin: &str, gen: u64) -> Option<Vec<String>> {
+        if let Some(p) = self.permissions_of_gen(plugin, gen) {
+            return Some(p.clone());
+        }
+        self.wasm.permissions_of(plugin).map(|p| p.to_vec())
+    }
+
     /// 每次 keystroke：向全部会话广播查询。空文本清空插件结果。
     /// 声明了 selected_files.read 的会话额外携带 context.files。
     pub fn broadcast(&mut self, text: &str) {
@@ -378,22 +408,31 @@ impl PluginMgr {
             self.latest.remove(&id);
         }
         // WASM 插件路由（双轨之二）：同步调用（~0.2ms），结果直接入 latest。
-        // 只认本插件词头时返回空列表，不占面板行。
-        for (wid, rows) in self.wasm.broadcast(text) {
-            if rows.is_empty() {
-                continue;
+        // 只认本插件词头时返回空列表，不占面板行。失败不再静默——计入
+        // 失败滑窗（连续超限运行期禁用，与 stdio 轨同待遇）。
+        for (wid, out) in self.wasm.broadcast(text) {
+            match out {
+                Err(e) => {
+                    self.record_failure(&wid);
+                    eprintln!("yihu-panel: WASM 插件 {wid} query 失败：{e}");
+                }
+                Ok(rows) => {
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    let entries: Vec<PanelEntry> = rows
+                        .into_iter()
+                        .map(|r| PanelEntry {
+                            title: r.title,
+                            subtitle: r.subtitle,
+                            icon_spec: "text-x-script".into(),
+                            kind: "plugin",
+                            payload: format!("{wid}|{}", r.payload),
+                        })
+                        .collect();
+                    self.latest.insert(wid, (id, entries));
+                }
             }
-            let entries: Vec<PanelEntry> = rows
-                .into_iter()
-                .map(|r| PanelEntry {
-                    title: r.title,
-                    subtitle: r.subtitle,
-                    icon_spec: "text-x-script".into(),
-                    kind: "plugin",
-                    payload: format!("{wid}|{}", r.payload),
-                })
-                .collect();
-            self.latest.insert(wid, (id, entries));
         }
     }
 
@@ -411,7 +450,8 @@ impl PluginMgr {
                 true
             }
         });
-        if self.sessions.len() != before {
+        let w = self.wasm.unload(id);
+        if self.sessions.len() != before || w {
             self.latest.remove(id);
             true
         } else {
@@ -579,12 +619,38 @@ impl PluginMgr {
                 Err(_) => break,
             }
         }
+        // WASM 轨的挂起请求（query/activate 期间经导入函数入队）：并入
+        // 同一事件流，主循环统一走 handle_capability/handle_ui_show。
+        for (id, d) in self.wasm.drain_all() {
+            for c in d.caps {
+                caps.push(CapRequest {
+                    plugin: id.clone(),
+                    gen: 0, // WASM 实例无会话代数；权限经 wasm 注册表解析
+                    request_id: c.request_id,
+                    capability: c.capability.to_string(),
+                    params: c.params,
+                });
+            }
+            for (ui_id, spec) in d.uis {
+                uis.push(UiShowRequest { plugin: id.clone(), gen: 0, ui_id, spec });
+            }
+        }
         (dirty, caps, uis)
     }
 
     /// 向指定会话回传 UI 事件（ui.event）。values 非空时内联为 JSON 对象
-    /// （submit 与 v2 的 action:<key> 都带；cancel 不带）。
+    /// （submit 与 v2 的 action:<key> 都带；cancel 不带）。WASM 插件路由到
+    /// on_ui_event 导出。
     pub fn send_ui_event(&mut self, plugin: &str, gen: u64, ui_id: u64, event: &str, values: &str) {
+        if self.wasm.is_loaded(plugin) {
+            let json = if values.is_empty() {
+                format!("{{\"ui_id\":{ui_id},\"event\":\"{event}\"}}")
+            } else {
+                format!("{{\"ui_id\":{ui_id},\"event\":\"{event}\",\"values\":{values}}}")
+            };
+            let _ = self.wasm.deliver_ui_event(plugin, &json);
+            return;
+        }
         let line = if values.is_empty() {
             format!("{{\"type\":\"ui.event\",\"ui_id\":{ui_id},\"event\":\"{event}\"}}")
         } else {
@@ -618,14 +684,29 @@ impl PluginMgr {
             .collect()
     }
 
-    /// 转发激活到来源插件会话。
-    pub fn activate(&mut self, plugin: &str, payload: &str) {
+    /// 转发激活到来源插件（stdio 会话或 WASM 实例）。
+    /// 返回 None 表示来源不是任何已加载插件（宿主复制 payload）。
+    pub fn activate(&mut self, plugin: &str, payload: &str) -> Option<()> {
+        if self.wasm.is_loaded(plugin) {
+            return match self.wasm.activate(plugin, payload) {
+                Some(Ok(())) => Some(()),
+                Some(Err(e)) => {
+                    eprintln!("yihu-panel: WASM 插件 {plugin} activate 失败：{e}");
+                    Some(())
+                }
+                None => None,
+            };
+        }
+        if !self.sessions.iter().any(|s| s.id == plugin) {
+            return None;
+        }
         let line = format!(
             "{{\"type\":\"activate\",\"id\":{},\"payload\":{}}}",
             self.query_seq,
             serde_json::to_string(payload).expect("payload 是合法 JSON 字符串")
         );
         self.send_all_to(plugin, &line);
+        Some(())
     }
 
     fn send_all_to(&mut self, plugin: &str, line: &str) {

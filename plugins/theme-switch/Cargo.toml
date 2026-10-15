@@ -1,0 +1,16 @@
+[package]
+name = "theme-switch-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[dependencies]
+yihu-wasm-runtime = { path = "../../crates/yihu-wasm-runtime" }
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -1,0 +1,12 @@
+id = "theme-switch"
+name = "深浅色切换"
+version = "0.1.0"
+api = "^1"
+entry = "theme_switch.wasm"
+icon = "night-light-symbolic"
+
+# permissions 必须位于任何 [[triggers]] 段之前（TOML 段归属约定）
+permissions = ["settings.write@org.gnome.desktop.interface", "notify"]
+
+[[triggers]]
+keywords = ["dark", "light", "深色", "浅色", "theme", "zhuti"]

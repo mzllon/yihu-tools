@@ -143,12 +143,16 @@ pub fn plugin_status_json() -> String {
     let state = yihu_core::plugins::PluginsState::load();
     let leaders = plugin_leaders();
     let procs = scan_all();
+    // WASM 插件无进程形态：运行状态/内存来自运行时快照（wasmtime 实例）
+    let wasm_snap: HashMap<String, u64> =
+        crate::wasm_plugin::status_snapshot().into_iter().collect();
 
     let mut items = Vec::new();
     for inst in &installed {
         let id = &inst.manifest.id;
         let leaders = leaders.get(id);
-        let running = leaders.is_some();
+        let wasm_kb = wasm_snap.get(id).copied();
+        let running = leaders.is_some() || wasm_kb.is_some();
         let (mut procs_n, mut rss_kb, mut ticks) = (0u32, 0u64, 0u64);
         if let Some(ls) = leaders {
             for p in &procs {
@@ -159,6 +163,7 @@ pub fn plugin_status_json() -> String {
                 }
             }
         }
+        rss_kb += wasm_kb.unwrap_or(0);
         items.push(json!({
             "id": id,
             "running": running,

@@ -231,7 +231,7 @@ pub fn run_daemon() {
                 // 异步能力结果（截屏等）：回包 + 审计 + 副作用
                 for out in deps.cap_async.lock().unwrap().drain(..) {
                     if out.ok {
-                        deps.plugins.borrow_mut().respond_gen(
+                        deps.plugins.borrow_mut().route_cap_response(
                             &out.plugin,
                             out.gen,
                             out.request_id,
@@ -291,7 +291,7 @@ pub fn run_daemon() {
                             );
                         }
                     } else {
-                        deps.plugins.borrow_mut().respond_gen(
+                        deps.plugins.borrow_mut().route_cap_response(
                             &out.plugin,
                             out.gen,
                             out.request_id,
@@ -878,7 +878,7 @@ fn handle_ui_show(deps: &Rc<Deps>, ui: crate::sessions::UiShowRequest) {
     if let Err(e) = crate::ui::show(ui.ui_id, &ui.plugin, &ui.spec, on_event) {
         deps.audit
             .record(&ui.plugin, ui.gen, "ui.show", "deny", &e);
-        deps.plugins.borrow_mut().respond_gen(
+        deps.plugins.borrow_mut().route_cap_response(
             &ui.plugin,
             ui.gen,
             ui.ui_id,
@@ -894,11 +894,7 @@ fn handle_ui_show(deps: &Rc<Deps>, ui: crate::sessions::UiShowRequest) {
 /// (id, gen) 精确配对：旧代会话的迟到请求只审计丢弃，不借新代执行
 /// （BUG-001 同源教训）。
 fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
-    let declared = deps
-        .plugins
-        .borrow()
-        .permissions_of_gen(&req.plugin, req.gen)
-        .cloned();
+    let declared = deps.plugins.borrow().permissions_for(&req.plugin, req.gen);
     let Some(declared) = declared else {
         deps.audit
             .record(&req.plugin, req.gen, &req.capability, "stale", "会话已换代，迟到请求丢弃");
@@ -1010,7 +1006,7 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
                 .record(&req.plugin, req.gen, &req.capability, "grant", "剪贴板识别");
             // 剪贴板纹理主线程异步读 → 落盘 → 线程跑 zbarimg → 回包
             let Some(display) = gdk::Display::default() else {
-                deps.plugins.borrow_mut().respond_gen(
+                deps.plugins.borrow_mut().route_cap_response(
                     &req.plugin,
                     req.gen,
                     req.request_id,
@@ -1114,7 +1110,7 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
             deps.audit
                 .record(&req.plugin, req.gen, &req.capability, "grant", "");
             let Some(display) = gdk::Display::default() else {
-                deps.plugins.borrow_mut().respond_gen(
+                deps.plugins.borrow_mut().route_cap_response(
                     &req.plugin,
                     req.gen,
                     req.request_id,
@@ -1171,14 +1167,14 @@ fn handle_capability(deps: &Deps, req: crate::sessions::CapRequest) {
         Ok(()) => {
             deps.plugins
                 .borrow_mut()
-                .respond_gen(&req.plugin, req.gen, req.request_id, true, "", None);
+                .route_cap_response(&req.plugin, req.gen, req.request_id, true, "", None);
             deps.audit
                 .record(&req.plugin, req.gen, &req.capability, "grant", "");
         }
         Err(e) => {
             deps.plugins
                 .borrow_mut()
-                .respond_gen(&req.plugin, req.gen, req.request_id, false, &e, None);
+                .route_cap_response(&req.plugin, req.gen, req.request_id, false, &e, None);
             deps.audit
                 .record(&req.plugin, req.gen, &req.capability, "deny", &e);
         }
