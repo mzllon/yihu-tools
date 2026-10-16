@@ -1863,11 +1863,19 @@ fn watch_theme(win: &Window) {
         w.add_css_class(if scheme == "prefer-dark" { "dark" } else { "light" });
     };
     let s = gio::Settings::new("org.gnome.desktop.interface");
+    let debug = std::env::var_os("YIHU_PANEL_DEBUG").is_some();
     apply(win, &s.string("color-scheme"));
+    let last = std::rc::Rc::new(std::cell::Cell::new(s.string("color-scheme").to_string()));
     {
         let win = win.clone();
+        let last = last.clone();
         s.connect_changed(Some("color-scheme"), move |s, _| {
-            apply(&win, &s.string("color-scheme"));
+            let scheme = s.string("color-scheme").to_string();
+            if debug {
+                eprintln!("yihu-panel: 系统主题变化（watch）→ {scheme}");
+            }
+            last.set(scheme.clone());
+            apply(&win, &scheme);
             apply_css(); // 深浅切换换整套调色板（UI 重设计）
         });
     }
@@ -1877,6 +1885,28 @@ fn watch_theme(win: &Window) {
             apply_css();
         });
     }
+    // 保活：gio::Settings 被 drop 会析构 GObject 并退订 dconf watch
+    //（BUG-004）。进程生命周期件，故意泄漏。
+    std::mem::forget(s);
+    // 轮询兜底（BUG-002 同源教训：实时通知不可靠就轮询闭环）。实测 gio
+    // watch 在守护进程内偶发不投递（最小程序同环境却正常，机制未明），
+    // 3s 进程内 dconf 读（无子进程）保证行为确定；与 watch 共享 last
+    // 去重，避免双重套色。
+    let win2 = win.clone();
+    glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
+        let scheme = gio::Settings::new("org.gnome.desktop.interface")
+            .string("color-scheme")
+            .to_string();
+        let prev = last.replace(scheme.clone());
+        if prev != scheme {
+            if debug {
+                eprintln!("yihu-panel: 系统主题变化（poll）→ {scheme}");
+            }
+            apply(&win2, &scheme);
+            apply_css();
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 // ---- 提供者：应用枚举 ----
