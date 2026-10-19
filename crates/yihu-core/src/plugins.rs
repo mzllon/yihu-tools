@@ -35,6 +35,15 @@ pub struct Manifest {
     pub api: String,
     /// 相对插件目录的可执行入口
     pub entry: String,
+    /// 插件形态（M7/W6）：缺省 stdio（bwrap+stdio 行协议）；"wasm" = entry
+    /// 为 .wasm 模块；"native" = entry 为宿主同架构 ELF——独立进程、自有
+    /// GTK 主循环的官方插件（docs/电台native插件设计.md §6.1）。
+    #[serde(default)]
+    pub kind: String,
+    /// native 插件的面板入口（可选）：插件目录内的 .wasm 文件名，由面板
+    /// WASM 运行时承载查询出行；窗体由激活动作按需拉起（单实例转发）。
+    #[serde(default)]
+    pub panel_entry: String,
     #[serde(default)]
     pub icon: String,
     #[serde(default)]
@@ -74,6 +83,21 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
     }
     if m.entry.is_empty() {
         return Err("entry 不能为空".into());
+    }
+    match m.kind.as_str() {
+        "" | "stdio" | "wasm" | "native" => {}
+        other => return Err(format!("未知 kind：{other:?}（允许 stdio/wasm/native）")),
+    }
+    if !m.panel_entry.is_empty() {
+        if m.kind != "native" {
+            return Err("panel_entry 仅 kind = \"native\" 支持".into());
+        }
+        if m.panel_entry.contains('/') || !m.panel_entry.ends_with(".wasm") {
+            return Err("panel_entry 必须是插件目录内的 .wasm 文件名".into());
+        }
+        if m.entry.ends_with(".wasm") {
+            return Err("kind = \"native\" 的 entry 必须是 ELF 可执行，不能是 .wasm".into());
+        }
     }
     if !api_matches(&m.api, PROTOCOL_MAJOR) {
         return Err(format!(
@@ -488,6 +512,49 @@ permissions = ["clipboard.write", "open_uri"]
 "#;
         let m = parse_manifest(good).unwrap();
         assert_eq!(m.permissions, vec!["clipboard.write", "open_uri"]);
+    }
+
+    #[test]
+    fn manifest_accepts_native_with_panel_entry() {
+        // M7/W6 native 形态：ELF 入口 + 可选面板 .wasm 入口
+        let m = parse_manifest(
+            r#"
+id = "radio"
+name = "电台"
+api = "^1"
+kind = "native"
+entry = "radio-player"
+panel_entry = "panel.wasm"
+permissions = ["network.fetch@search.qingting.fm"]
+
+[[triggers]]
+keywords = ["radio", "电台"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.kind, "native");
+        assert_eq!(m.panel_entry, "panel.wasm");
+    }
+
+    #[test]
+    fn manifest_rejects_bad_kind_and_panel_entry() {
+        let base = |kind: &str, entry: &str, panel: &str| {
+            format!(
+                "id = \"a\"\nname = \"x\"\napi = \"^1\"\nkind = \"{kind}\"\nentry = \"{entry}\"\npanel_entry = \"{panel}\"\n"
+            )
+        };
+        assert!(parse_manifest(&base("process", "x", "")).unwrap_err().contains("kind"));
+        // panel_entry 只属于 native
+        assert!(parse_manifest(&base("", "x", "panel.wasm"))
+            .unwrap_err()
+            .contains("panel_entry"));
+        // native 的 entry 不得是 .wasm（那是 wasm 形态）
+        assert!(parse_manifest(&base("native", "p.wasm", "panel.wasm"))
+            .unwrap_err()
+            .contains("ELF"));
+        // panel_entry 必须是目录内 .wasm 文件名
+        assert!(parse_manifest(&base("native", "player", "sub/panel.wasm")).is_err());
+        assert!(parse_manifest(&base("native", "player", "panel.py")).is_err());
     }
 
     #[test]

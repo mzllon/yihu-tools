@@ -339,14 +339,32 @@ impl WasmPlugin {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        let memory = self
-            .instance
-            .get_memory(&mut self.store, "memory")
-            .ok_or("无 memory 导出")?;
         let query_fn = self
             .instance
             .get_typed_func::<(i32, i32, i64), i32>(&mut self.store, "query")
             .map_err(|e| format!("无 query：{e}"))?;
+
+        let (qptr, qlen) = self.write_heap(text.as_bytes())?;
+        query_fn
+            .call(&mut self.store, (qptr, qlen, now_secs))
+            .map_err(|e| format!("query 执行失败：{e}"))?;
+
+        self.read_rows()
+    }
+
+    /// 读取当前结果缓冲（不重跑 query）。插件在 on_response 里重设行后
+    /// （异步搜索回包 / 播放状态行），宿主经此取回并刷新面板列表。
+    pub fn take_results(&mut self) -> Result<Vec<WasmRow>, String> {
+        self.last_used = Instant::now();
+        self.read_rows()
+    }
+
+    /// result_count/result_field 协议读取（query 与 take_results 共用）
+    fn read_rows(&mut self) -> Result<Vec<WasmRow>, String> {
+        let memory = self
+            .instance
+            .get_memory(&mut self.store, "memory")
+            .ok_or("无 memory 导出")?;
         let result_count = self
             .instance
             .get_typed_func::<(), i32>(&mut self.store, "result_count")
@@ -359,11 +377,6 @@ impl WasmPlugin {
             .instance
             .get_typed_func::<(i32, i32), i32>(&mut self.store, "result_field_len")
             .map_err(|e| format!("无 result_field_len：{e}"))?;
-
-        let (qptr, qlen) = self.write_heap(text.as_bytes())?;
-        query_fn
-            .call(&mut self.store, (qptr, qlen, now_secs))
-            .map_err(|e| format!("query 执行失败：{e}"))?;
 
         let n = result_count.call(&mut self.store, ()).map_err(|e| e.to_string())?;
         let mut rows = Vec::new();
@@ -537,6 +550,11 @@ impl WasmRegistry {
         Some(self.plugins.get_mut(id)?.activate(payload))
     }
 
+    /// 取回某插件的结果缓冲（on_response 重设行后）；未加载返回 None
+    pub fn take_results(&mut self, id: &str) -> Option<Result<Vec<WasmRow>, String>> {
+        Some(self.plugins.get_mut(id)?.take_results())
+    }
+
     /// 排干全部插件的挂起请求：(id, drain)
     pub fn drain_all(&mut self) -> Vec<(String, WasmDrain)> {
         self.plugins
@@ -677,7 +695,7 @@ mod tests {
         let mut reg = WasmRegistry::default();
         reg.ensure_loaded("theme-switch", &p, &full).unwrap();
         assert!(reg.query("theme-switch", "dark").unwrap().len() == 2);
-        reg.activate("theme-switch", "prefer-dark").unwrap();
+        reg.activate("theme-switch", "prefer-dark").unwrap().unwrap();
         let drains = reg.drain_all();
         let (_, d) = drains.iter().find(|(id, _)| id == "theme-switch").unwrap();
         assert_eq!(d.caps.len(), 1, "activate 应发出一个能力请求");

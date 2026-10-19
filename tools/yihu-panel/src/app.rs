@@ -230,8 +230,11 @@ pub fn run_daemon() {
                 }
                 // 异步能力结果（截屏等）：回包 + 审计 + 副作用
                 for out in deps.cap_async.lock().unwrap().drain(..) {
+                    // 回包可能触发插件重设结果行（WASM 异步搜索/状态行）：
+                    // 行变化即置 dirty，主循环重渲染列表
+                    let mut rows_changed;
                     if out.ok {
-                        deps.plugins.borrow_mut().route_cap_response(
+                        rows_changed = deps.plugins.borrow_mut().route_cap_response(
                             &out.plugin,
                             out.gen,
                             out.request_id,
@@ -291,7 +294,7 @@ pub fn run_daemon() {
                             );
                         }
                     } else {
-                        deps.plugins.borrow_mut().route_cap_response(
+                        rows_changed = deps.plugins.borrow_mut().route_cap_response(
                             &out.plugin,
                             out.gen,
                             out.request_id,
@@ -313,6 +316,9 @@ pub fn run_daemon() {
                                 &["--app-name=一呼", &format!("截图失败：{}", out.error)],
                             );
                         }
+                    }
+                    if rows_changed && deps.visible.load(Ordering::Relaxed) {
+                        deps.dirty.set(true);
                     }
                 }
                 // 常驻 provider 空闲清扫只在隐藏态跑（可见态 keystroke

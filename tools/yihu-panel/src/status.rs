@@ -54,6 +54,7 @@ fn plugin_id_of_bwrap(args: &[String]) -> Option<String> {
 }
 
 struct ProcInfo {
+    pid: i32,
     pgrp: i32,
     ticks: u64,
     rss_kb: u64,
@@ -75,6 +76,7 @@ fn scan_all() -> Vec<ProcInfo> {
         };
         if let Some((pgrp, ticks, rss_pages)) = parse_stat(&text) {
             out.push(ProcInfo {
+                pid,
                 pgrp,
                 ticks,
                 rss_kb: rss_pages * page_kb,
@@ -137,11 +139,44 @@ fn cpu_percent(id: &str, ticks_now: u64) -> f64 {
     })
 }
 
+/// native 插件进程识别（M7/W6）：cmdline[0] = 注册表内 <id>/<entry> 全路径
+/// （ELF 不进沙箱，路径本身就是归属标记；spawn_native_detached 用同一
+/// 绝对路径，相等比较成立）。
+fn native_leaders(installed: &[yihu_core::plugins::Installed]) -> HashMap<String, Vec<i32>> {
+    let mut out: HashMap<String, Vec<i32>> = HashMap::new();
+    let markers: HashMap<String, String> = installed
+        .iter()
+        .filter(|i| i.manifest.kind == "native")
+        .map(|i| (i.entry_path().to_string_lossy().to_string(), i.manifest.id.clone()))
+        .collect();
+    if markers.is_empty() {
+        return out;
+    }
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let Some(pid) = e.file_name().to_string_lossy().parse::<i32>().ok() else {
+            continue;
+        };
+        let Some(args) = read_cmdline(pid) else {
+            continue;
+        };
+        if let Some(id) = args.first().and_then(|p| markers.get(p)) {
+            out.entry(id.clone()).or_default().push(pid);
+        }
+    }
+    out
+}
+
 /// 汇总全部已装插件的运行态（/proc 实扫 + 注册表清单）
 pub fn plugin_status_json() -> String {
     let (installed, _) = yihu_core::plugins::list_installed();
     let state = yihu_core::plugins::PluginsState::load();
-    let leaders = plugin_leaders();
+    let mut leaders = plugin_leaders();
+    for (id, pids) in native_leaders(&installed) {
+        leaders.entry(id).or_default().extend(pids);
+    }
     let procs = scan_all();
     // WASM 插件无进程形态：运行状态/内存来自运行时快照（wasmtime 实例）
     let wasm_snap: HashMap<String, u64> =
@@ -155,8 +190,14 @@ pub fn plugin_status_json() -> String {
         let running = leaders.is_some() || wasm_kb.is_some();
         let (mut procs_n, mut rss_kb, mut ticks) = (0u32, 0u64, 0u64);
         if let Some(ls) = leaders {
+            // 组归属：本集 pgrp 直接命中；native 插件从终端手拉时 leader
+            // 不是组长，按 leader 自身的 pgrp 归并（gst-play 子进程同组）
+            let extra: Vec<i32> = ls
+                .iter()
+                .filter_map(|pid| procs.iter().find(|p| p.pid == *pid).map(|p| p.pgrp))
+                .collect();
             for p in &procs {
-                if ls.contains(&p.pgrp) {
+                if ls.contains(&p.pgrp) || extra.contains(&p.pgrp) {
                     procs_n += 1;
                     rss_kb += p.rss_kb;
                     ticks += p.ticks;

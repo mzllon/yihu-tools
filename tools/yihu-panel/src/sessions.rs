@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -40,6 +41,11 @@ pub struct UiShowRequest {
     pub gen: u64,
     pub ui_id: u64,
     pub spec: serde_json::Value,
+}
+
+/// native 插件登记项（激活动作的 spawn 依据）
+struct NativeInfo {
+    entry: std::path::PathBuf,
 }
 
 pub enum PluginEvent {
@@ -98,6 +104,10 @@ pub struct PluginMgr {
     latest: HashMap<String, (u64, Vec<PanelEntry>)>,
     /// WASM 插件后端（entry 以 .wasm 结尾的插件；架构终版 §4，双轨之一）
     wasm: crate::wasm_plugin::WasmRegistry,
+    /// native 插件（kind="native"，M7/W6）：id → 入口 ELF 绝对路径。
+    /// 不建立 stdio 会话；激活动作按需 spawn（单实例转发），面板不管
+    /// 其进程生命周期（窗体常驻后台播放是产品语义）。
+    natives: HashMap<String, NativeInfo>,
     /// 选中文件上下文（SelectFiles 注入，收起即清）；query 时按
     /// manifest 权限（selected_files.read）转发给对应会话
     context_files: Vec<String>,
@@ -117,6 +127,7 @@ impl PluginMgr {
             current_query: None,
             latest: HashMap::new(),
             wasm: crate::wasm_plugin::WasmRegistry::default(),
+            natives: HashMap::new(),
             context_files: Vec::new(),
         }
     }
@@ -162,6 +173,48 @@ impl PluginMgr {
             if self.recent_failures(&id) >= MAX_FAILURES {
                 eprintln!("yihu-panel: 插件 {id} 连续失败 {MAX_FAILURES} 次，本次运行期禁用");
                 self.disabled_by_failures.insert(id);
+                continue;
+            }
+            // native 插件（M7/W6）：不 spawn stdio 会话、不参与查询管道；
+            // 面板出行由可选 panel_entry（.wasm）承载——载入同一 WASM 运行
+            // 时。窗体进程由激活动作按需拉起（GApplication 单实例转发），
+            // 面板收起/退出都不断它的收听。
+            if inst.manifest.kind == "native" {
+                if let Err(e) = plugins::ensure_plugin_data_dir_in(data_root, &id) {
+                    eprintln!("yihu-panel: native 插件 {id} 数据目录建立失败：{e}");
+                    self.record_failure(&id);
+                    continue;
+                }
+                let entry = inst.entry_path();
+                let exec_ok = std::fs::metadata(&entry)
+                    .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false);
+                if !exec_ok {
+                    eprintln!(
+                        "yihu-panel: native 插件 {id} 入口缺失或不可执行：{}",
+                        entry.display()
+                    );
+                    self.record_failure(&id);
+                    continue;
+                }
+                if !inst.manifest.panel_entry.is_empty() {
+                    let panel_wasm = inst.dir.join(&inst.manifest.panel_entry);
+                    match self.wasm.ensure_loaded(&id, &panel_wasm, &inst.manifest.permissions) {
+                        Ok(true) => {
+                            if debug {
+                                eprintln!("yihu-panel: native 插件 {id} 面板入口已加载");
+                            }
+                        }
+                        Ok(false) => {
+                            eprintln!("yihu-panel: native 插件 {id} 的 panel_entry 不是 .wasm");
+                        }
+                        Err(e) => {
+                            eprintln!("yihu-panel: native 插件 {id} 面板入口加载失败：{e}");
+                            self.record_failure(&id);
+                        }
+                    }
+                }
+                self.natives.insert(id.clone(), NativeInfo { entry });
                 continue;
             }
             // WASM 插件（entry=.wasm）：不 spawn 进程，载入 wasmtime 注册表。
@@ -332,7 +385,7 @@ impl PluginMgr {
 
     /// 能力执行回包路由：WASM 插件经 on_response 导出回传，stdio 会话写
     /// capability_response。异步执行器（spawn_*_job）与同步路径统一走这里，
-    /// 执行器本身不感知传输轨。
+    /// 执行器本身不感知传输轨。返回 true = 面板结果行有变化（调用方置 dirty）。
     pub fn route_cap_response(
         &mut self,
         plugin: &str,
@@ -341,14 +394,50 @@ impl PluginMgr {
         ok: bool,
         error: &str,
         data: Option<&str>,
-    ) {
+    ) -> bool {
         if self.wasm.is_loaded(plugin) {
             if let Some(Err(e)) = self.wasm.deliver_response(plugin, request_id, ok, error, data) {
                 eprintln!("yihu-panel: WASM 插件 {plugin} 回包失败：{e}");
+                return false;
             }
-            return;
+            // 插件可能在 on_response 里重设了结果缓冲（异步搜索回包、
+            // 播放状态行）：取回并按当前查询刷新。
+            return self.refresh_wasm_rows(plugin);
         }
         self.respond_gen(plugin, gen, request_id, ok, error, data);
+        false
+    }
+
+    /// 取回某 WASM 插件的结果缓冲并更新 latest。行内容与既有 latest 完全
+    /// 一致时不报变化（避免能力回包触发的整表重建闪烁）。
+    fn refresh_wasm_rows(&mut self, id: &str) -> bool {
+        let Some((qid, _)) = self.current_query.as_ref().map(|(t, i)| (*i, t)) else {
+            return false;
+        };
+        let rows = match self.wasm.take_results(id) {
+            Some(Ok(r)) => r,
+            Some(Err(e)) => {
+                eprintln!("yihu-panel: WASM 插件 {id} 结果读取失败：{e}");
+                return false;
+            }
+            None => return false,
+        };
+        let entries = wasm_entries(id, rows);
+        let unchanged = self
+            .latest
+            .get(id)
+            .is_some_and(|(old_qid, old)| {
+                *old_qid == qid
+                    && old.len() == entries.len()
+                    && old.iter().zip(&entries).all(|(a, b)| {
+                        a.title == b.title && a.subtitle == b.subtitle && a.payload == b.payload
+                    })
+            });
+        if unchanged {
+            return false;
+        }
+        self.latest.insert(id.to_string(), (qid, entries));
+        true
     }
 
     /// 解析插件的 manifest 声明权限：stdio 按会话代数，WASM 查注册表。
@@ -420,16 +509,7 @@ impl PluginMgr {
                     if rows.is_empty() {
                         continue;
                     }
-                    let entries: Vec<PanelEntry> = rows
-                        .into_iter()
-                        .map(|r| PanelEntry {
-                            title: r.title,
-                            subtitle: r.subtitle,
-                            icon_spec: "text-x-script".into(),
-                            kind: "plugin",
-                            payload: format!("{wid}|{}", r.payload),
-                        })
-                        .collect();
+                    let entries = wasm_entries(&wid, rows);
                     self.latest.insert(wid, (id, entries));
                 }
             }
@@ -437,8 +517,14 @@ impl PluginMgr {
     }
 
     /// 用户显式停止指定插件：SIGKILL 进程组并移除会话，
-    /// **不计入失败统计**（与崩溃/超时不同，是用户主动操作）
+    /// **不计入失败统计**（与崩溃/超时不同，是用户主动操作）。
+    /// native 插件转发 --quit（窗体优雅退出并停播），无会话可杀。
     pub fn kill_plugin(&mut self, id: &str) -> bool {
+        let mut native = false;
+        if let Some(n) = self.natives.get(id) {
+            spawn_native_detached(&n.entry, &["--quit".to_string()]);
+            native = true;
+        }
         let before = self.sessions.len();
         self.sessions.retain(|s| {
             if s.id == id {
@@ -451,7 +537,7 @@ impl PluginMgr {
             }
         });
         let w = self.wasm.unload(id);
-        if self.sessions.len() != before || w {
+        if native || self.sessions.len() != before || w {
             self.latest.remove(id);
             true
         } else {
@@ -685,8 +771,17 @@ impl PluginMgr {
     }
 
     /// 转发激活到来源插件（stdio 会话或 WASM 实例）。
+    /// native 插件的动作用于拉起窗体进程：宿主 spawn entry 带参
+    /// （GApplication 单实例转发到运行中实例，docs/电台native插件设计.md §4.7）。
     /// 返回 None 表示来源不是任何已加载插件（宿主复制 payload）。
     pub fn activate(&mut self, plugin: &str, payload: &str) -> Option<()> {
+        if let Some(n) = self.natives.get(plugin) {
+            if let Some(args) = native_args(payload) {
+                spawn_native_detached(&n.entry, &args);
+                return Some(());
+            }
+            // 非动作 payload：落到 WASM 激活（mini 壳自定义行为）
+        }
         if self.wasm.is_loaded(plugin) {
             return match self.wasm.activate(plugin, payload) {
                 Some(Ok(())) => Some(()),
@@ -749,6 +844,72 @@ impl PluginMgr {
                 }
             });
         }
+    }
+}
+
+/// WASM 结果行 → 面板条目（broadcast 与能力回包刷新共用）
+fn wasm_entries(wid: &str, rows: Vec<crate::wasm_plugin::WasmRow>) -> Vec<PanelEntry> {
+    rows.into_iter()
+        .map(|r| PanelEntry {
+            title: r.title,
+            subtitle: r.subtitle,
+            icon_spec: "text-x-script".into(),
+            kind: "plugin",
+            payload: format!("{wid}|{}", r.payload),
+        })
+        .collect()
+}
+
+/// native 插件的动作 payload → entry 命令行参数。
+/// 行 payload 带 `!` 前缀由 app::dispatch_item 剥掉后到达此处：
+/// open / stop / quit / play:<id>|<标题>。返回 None = 非动作 payload。
+fn native_args(payload: &str) -> Option<Vec<String>> {
+    match payload {
+        "open" => Some(vec!["--open".into()]),
+        "stop" => Some(vec!["--stop".into()]),
+        "quit" => Some(vec!["--quit".into()]),
+        _ => {
+            let rest = payload.strip_prefix("play:")?;
+            let (cid, title) = rest.split_once('|')?;
+            // id 必须是数字：防止把任意文本当参数传给窗体进程
+            if cid.is_empty() || !cid.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let title = title.trim();
+            Some(vec![
+                "--play".into(),
+                cid.to_string(),
+                if title.is_empty() { format!("频道 {cid}") } else { title.to_string() },
+            ])
+        }
+    }
+}
+
+/// 拉起 native 入口（setsid 脱离面板进程组：面板收起/退出不断收听；
+/// 短命转发进程由专用线程收尸，面板先退则由 init 回收）。绝不阻塞主循环。
+fn spawn_native_detached(entry: &std::path::Path, args: &[String]) {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(entry);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // 自己的会话：与面板进程组彻底解耦（硬性规则 #1：spawn 即返回）
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    match cmd.spawn() {
+        Ok(child) => {
+            std::thread::spawn(move || {
+                let mut child = child;
+                let _ = child.wait();
+            });
+        }
+        Err(e) => eprintln!("yihu-panel: 拉起 native 插件 {} 失败：{e}", entry.display()),
     }
 }
 
@@ -836,6 +997,68 @@ fn parse_line(plugin: &str, gen: u64, line: &str) -> Option<PluginEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_args_parse_action_payloads() {
+        assert_eq!(
+            native_args("open"),
+            Some(vec!["--open".to_string()])
+        );
+        assert_eq!(
+            native_args("stop"),
+            Some(vec!["--stop".to_string()])
+        );
+        assert_eq!(
+            native_args("play:1133|杭州交通"),
+            Some(vec!["--play".into(), "1133".into(), "杭州交通".into()])
+        );
+        // 空标题回退「频道 <id>」
+        assert_eq!(
+            native_args("play:99|"),
+            Some(vec!["--play".into(), "99".into(), "频道 99".into()])
+        );
+        // id 非数字：拒绝（防任意文本进窗体进程参数）
+        assert!(native_args("play:abc|x").is_none());
+        assert!(native_args("play:|x").is_none());
+        // 非动作 payload：None（落到 WASM 激活）
+        assert!(native_args("复制文本").is_none());
+    }
+
+    #[test]
+    fn native_plugin_is_registered_without_session() {
+        if !crate::sandbox::available() {
+            eprintln!("跳过：缺 bwrap");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("yihu-native-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("fake-native");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.toml"),
+            "id = \"fake-native\"\nname = \"假 native\"\napi = \"^1\"\nkind = \"native\"\nentry = \"player\"\npanel_entry = \"panel.wasm\"\n",
+        )
+        .unwrap();
+        // 入口用 /bin/true 拷贝（可执行、忽略参数、即退）
+        std::fs::copy("/bin/true", dir.join("player")).unwrap();
+        std::fs::write(dir.join("panel.wasm"), b"not-a-real-module").unwrap();
+
+        let mut mgr = PluginMgr::new();
+        mgr.ensure_sessions_in(&base, &base);
+        // native 不建立 stdio 会话；panel.wasm 非法模块 → 加载失败计失败，
+        // 但 native 登记不落——record_failure 只在 entry 缺失时才跳过登记，
+        // wasm 失败路径同样登记（窗体仍可被中心/命令行拉起）
+        assert!(!mgr.is_session_alive("fake-native"));
+        assert!(
+            mgr.natives.contains_key("fake-native"),
+            "native 登记应存在（wasm 面板入口失败只影响出行）"
+        );
+        // 激活动作：spawn 即返回（/bin/true 立即退出），不阻塞不 panic
+        mgr.activate("fake-native", "open").unwrap();
+        // 用户停止：native 转发 --quit，返回 true
+        assert!(mgr.kill_plugin("fake-native"));
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     #[test]
     fn parses_results_and_capability_request() {

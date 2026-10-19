@@ -127,6 +127,12 @@ macro_rules! export_plugin {
                 )
                 .to_string();
                 $crate::__rows_clear();
+                // 写指针归零（BUG-006）：共享区此前只增不减，面板守护进程
+                // 长期运行会把它耗尽、插件静默失效。归零安全：此刻查询文本
+                // 已拷出；随后 handle() 的能力参数、结果读取的追加都写在
+                // 归零后的区域，宿主读取发生在 query 返回之后，无活跃指针
+                // 指向被覆盖区。
+                $crate::__heap_reset();
                 let rows = std::panic::catch_unwind(|| {
                     <$ty as $crate::PluginHandler>::handle(&text, now_secs)
                 })
@@ -185,6 +191,13 @@ pub extern "C" fn __rows_clear() {
 #[doc(hidden)]
 pub fn __rows_store(new_rows: Vec<Row>) {
     *rows() = new_rows;
+}
+
+/// 内部：共享区写指针归零（export_plugin! 的 query 导出在每次查询开头
+/// 调用；BUG-006——见宏内注释）
+#[doc(hidden)]
+pub fn __heap_reset() {
+    unsafe { HEAP_LEN = 0 };
 }
 
 #[doc(hidden)]
