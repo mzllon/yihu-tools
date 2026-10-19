@@ -114,6 +114,8 @@ pub struct RadioApp {
     engine: Arc<Engine>,
     /// 事件槽（线程 push、主循环 30ms 轮询 drain——面板 cap_async 同款）
     slot: Arc<Mutex<Vec<Event>>>,
+    /// 托盘菜单命令回主循环（无托盘环境为 None）
+    tray_rx: Option<std::sync::mpsc::Receiver<crate::tray::Command>>,
     quit_btn: gtk::Button,
     cur: RefCell<Option<Channel>>,
     playing: Cell<bool>,
@@ -349,6 +351,7 @@ impl RadioApp {
             mini_stop,
             engine: Arc::new(Engine::new()),
             slot: Arc::new(Mutex::new(Vec::new())),
+            tray_rx: crate::tray::install(),
             quit_btn,
             cur: RefCell::new(None),
             playing: Cell::new(false),
@@ -369,6 +372,19 @@ impl RadioApp {
             let events: Vec<Event> = ra2.slot.lock().unwrap().drain(..).collect();
             for ev in events {
                 ra2.on_event(ev);
+            }
+            // 托盘菜单命令（D-Bus 工作线程 → 主循环执行）
+            if let Some(rx) = &ra2.tray_rx {
+                for cmd in rx.try_iter() {
+                    match cmd {
+                        crate::tray::Command::Show => ra2.win.present(),
+                        crate::tray::Command::Toggle => ra2.toggle_play(),
+                        crate::tray::Command::Quit => {
+                            ra2.quit();
+                            break;
+                        }
+                    }
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -431,6 +447,9 @@ impl RadioApp {
 
         let ra = self.clone();
         self.quit_btn.connect_clicked(move |_| ra.quit());
+
+        // 托盘 ksni 服务线程随应用退出收尾
+        self.app.connect_shutdown(move |_| crate::tray::shutdown());
 
         // 关窗 = 隐藏继续播（设计稿 §6.2；首次提示一次）
         self.win.connect_close_request(move |w| {
@@ -661,6 +680,11 @@ impl RadioApp {
         if let Some(ch) = &cur {
             self.set_main_cover(ch);
         }
+        // 托盘同步：图标底色/状态行/tooltip/播放-停止标签
+        crate::tray::set_state(
+            playing,
+            &cur.map(|c| display_title(&c)).unwrap_or_default(),
+        );
         self.sync_fav_btn();
     }
 

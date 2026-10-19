@@ -130,6 +130,12 @@ permissions = [ ... ]      # 保留：中心页展示 + 审计对照；native �
   `radio-player --quit`。实现上 close-request 回调拦截 + g_application_hold。
 - 进程独立于面板：面板退出收听不中断；插件中心「停止」= 优雅退出窗体并停播。
 - 运行状态上报：中心 PluginStatus 扩展 native 条目（进程实扫沿用 status.rs）。
+- **独立系统托盘（2026-10-19 补，用户提出）**：radio 进程注册自己的
+  SNI 托盘项（ksni，与中心应用同通道；SNI 是 freedesktop 标准，多应用并存
+  即标准形态）。菜单：正在播状态行 / 播放·停止 / 显示主窗 / 退出（停播），
+  播放态联动图标与 tooltip。无 watcher 环境静默降级为无托盘；「插件寄宿
+  中心托盘菜单项」留作无 watcher 环境的未来兜底，须做成插件协议通用契约。
+  托盘命令经 mpsc 回主循环，状态经 ksni Handle 刷新（线程安全）。
 
 ### 6.3 跨组件状态契约（native ⇄ panel.wasm）
 

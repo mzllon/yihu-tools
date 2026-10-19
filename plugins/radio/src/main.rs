@@ -11,6 +11,7 @@ mod api;
 mod engine;
 mod store;
 mod theme;
+mod tray;
 mod ui;
 
 use std::cell::RefCell;

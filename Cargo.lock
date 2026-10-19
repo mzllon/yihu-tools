@@ -2038,6 +2038,7 @@ name = "radio-player"
 version = "0.1.0"
 dependencies = [
  "gtk4",
+ "ksni",
  "libc",
  "serde",
  "serde_json",
