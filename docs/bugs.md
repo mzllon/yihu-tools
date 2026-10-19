@@ -125,3 +125,40 @@
   2. 长生命周期宿主 + 复用实例的架构下，「内存只增不减」类缺陷按每次开销看
      都微不足道，按驻留时长看必然爆发——review 时要把每次成本 × 调用频次 ×
      进程寿命。
+
+---
+
+## BUG-007 电台播放页交付与草图严重走样（封面横幅 / 控制键竖胶囊 / 播放键白底）
+
+- **日期**：2026-10-19（W6 第二三波交付，用户对照 docs/电台native插件-草图.html 验收打回）
+- **现象**：三处并现——① 封面 `GtkPicture` 被撑成全宽横幅（蜻蜓 2014 年台标是
+  宽幅图，`ContentFit::Cover` 放大裁切）；② 星标/菜单键被拉成 42×60 竖胶囊，
+  主播放键 58 圆倒是正常；③ 主播放键橙底没画上、白色图标在白底上不可见；
+  附带 ≡ 菜单键完全吃不到 `.rp-ctl` 样式。
+- **根因**（四个独立机制叠加，全部经 examples/ui_probe 探针实测定位后删除）：
+  1. `GtkPicture` 的 natural 尺寸 = 图像像素尺寸，GTK 布局里没有任何容器
+     能把 non-expand 子钳到 `size_request`——CSS min/size_request 只抬最低值，
+     halign Center 也按 natural 分配。宽幅封面天然尺寸 > 窗口 → 横幅。
+  2. 水平 `Box` 同排最高子决定排高，其余子默认 `valign=Fill` 被纵向拉伸：
+     58px 主播放键把 40px 小键拉成 60px 高、radius 20 的竖胶囊。用户首张
+     截图（44×76 胶囊）与 76px 旧播放键同排，完全吻合此机制。
+  3. GTK 内置默认主题给 `button` 画的是 **background-image**，APPLICATION
+     优先级的 `background-color` 被它整个盖住——只有加了
+     `background-image: none` 才显出来。border/color/min-* 不受影响，
+     所以「半生效」极具迷惑性。
+  4. `MenuButton` 的可见壳是其内部 `button` CSS 节点，类加在外层
+     menubutton 节点上管不到内部，需要 `.rp-ctl > button` 后代选择器。
+- **修复**：① 封面字节在解码层中心方裁 + `scale_simple` 到精确逻辑尺寸
+  （主 168/r20、行 40/r10），natural 恰等于目标值；② 同排小键一律
+  `set_valign(Center)`；③ 所有自绘按钮补 `background-image: none`；
+  ④ 补 `.rp-ctl > button` 规则。验证：探针打印 allocated 尺寸（42×42 /
+  60×60）+ Xwayland 真窗截图逐项对齐草图。
+- **教训**：
+  1. GTK4 的「CSS 写了没生效」要先分三类：没解析（看 stderr warning）、
+     被更高优先级 provider 覆盖、还是被**默认主题的另一种绘制手段**
+     （image vs color）盖住——第 3 类最难猜，探针对照实验 5 分钟破案。
+  2. `size_request`/`min-width` 在 GTK 里是「最低值」不是「固定值」；
+     要固定尺寸必须让 natural 恰等于目标（图像预缩放）并阻断 Fill 拉伸
+     （valign/halign Center）。
+  3. 视觉交付必须实机截图验收，样式表「看起来对」不算数；一次性探针
+     example（渲染变体 + 打印 allocated 尺寸）是定位这类问题的最快路径。

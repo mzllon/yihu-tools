@@ -100,55 +100,113 @@ fn hex(rgb: (u8, u8, u8)) -> String {
     format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2)
 }
 
-/// 生成播放器完整样式表。视觉：播放器优先大封面 + 大控制键，
-/// 扁平浮层、强调色贯穿（大播放键/选中行/收藏星）。
+/// 生成播放器完整样式表。视觉口径 = docs/电台native插件-草图.html 方向 C：
+/// 168 圆角封面卡 + 绿点正在播 + 40/58 圆控制键 + 入口胶囊 + 列表卡片行。
+/// 只用 GTK4 支持的属性（无 filter/transition；border 用长手写法）。
 pub fn build_css(dark: bool, accent: Accent) -> String {
     let a = hex(rgb(accent, dark));
-    let (bg, fg, dim, hover, surface) = if dark {
-        ("#1e1e20", "#ffffff", "rgba(255,255,255,0.62)", "rgba(255,255,255,0.08)", "rgba(255,255,255,0.10)")
+    let (bg, fg, dim, hover, surface, border, green) = if dark {
+        (
+            "#1e1e20",
+            "#ffffff",
+            "rgba(255,255,255,0.60)",
+            "rgba(255,255,255,0.08)",
+            "rgba(255,255,255,0.10)",
+            "rgba(255,255,255,0.14)",
+            "#35c26e",
+        )
     } else {
-        ("#fafafa", "#323232", "rgba(0,0,0,0.55)", "rgba(0,0,0,0.06)", "rgba(0,0,0,0.09)")
+        (
+            "#fafafa",
+            "#323232",
+            "rgba(0,0,0,0.55)",
+            "rgba(0,0,0,0.06)",
+            "rgba(0,0,0,0.09)",
+            "rgba(20,20,30,0.14)",
+            "#1f9d55",
+        )
     };
     format!(
         r#"
 .rp-root {{ background-color: {bg}; color: {fg}; }}
 
-.rp-title {{ font-size: 22px; font-weight: 700; }}
-.rp-prog {{ font-size: 13px; color: {a}; font-weight: 600; }}
-.rp-meta {{ font-size: 12px; color: {dim}; }}
-
-.rp-cover {{
-  border-radius: 24px;
-  background-color: {surface};
-}}
+/* —— 播放页 —— */
+.rp-cover {{ border-radius: 20px; background-color: {surface}; }}
 .rp-cover-fallback {{
-  border-radius: 24px;
-  font-size: 64px;
-  font-weight: 800;
-  color: rgba(255,255,255,0.9);
+  border-radius: 20px;
+  font-size: 34px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.94);
   background-image: linear-gradient(to bottom right, {a}, alpha({a}, 0.45));
 }}
+.rp-dot {{
+  min-width: 7px;
+  min-height: 7px;
+  border-radius: 4px;
+  background-color: {green};
+}}
+.rp-prog {{ font-size: 13px; font-weight: 600; color: {a}; }}
+.rp-title {{ font-size: 19px; font-weight: 600; }}
+.rp-meta {{ font-size: 12px; color: {dim}; }}
 
-/* —— 控制排 —— */
 .rp-ctl {{
-  min-width: 44px; min-height: 44px;
-  border-radius: 22px;
+  min-width: 40px;
+  min-height: 40px;
   padding: 0;
-  background-color: {surface};
+  border-radius: 20px;
+  border-width: 1px;
+  border-style: solid;
+  border-color: {border};
+  background-color: transparent;
+  background-image: none;
   color: {fg};
 }}
 .rp-ctl:hover {{ background-color: {hover}; }}
-.rp-play {{
-  min-width: 76px; min-height: 76px;
-  border-radius: 38px;
+/* MenuButton 的可见壳是内部 button 节点，类加在外层管不到（≡ 键返工） */
+.rp-ctl > button {{
   padding: 0;
-  background-color: {a};
-  color: #ffffff;
-  font-size: 15px;
+  border-radius: 20px;
+  border-width: 1px;
+  border-style: solid;
+  border-color: {border};
+  background-color: transparent;
+  background-image: none;
+  color: {fg};
 }}
-.rp-play:hover {{ filter: brightness(1.08); }}
+.rp-ctl > button:hover {{ background-color: {hover}; }}
+.rp-play {{
+  min-width: 58px;
+  min-height: 58px;
+  padding: 0;
+  border-radius: 29px;
+  border-width: 1px;
+  border-style: solid;
+  border-color: {a};
+  background-color: {a};
+  background-image: none;
+  color: #ffffff;
+}}
+.rp-play:hover {{ background-color: alpha({a}, 0.85); }}
 .rp-star-fav {{ color: {a}; }}
-.rp-vol {{ padding: 0 8px; }}
+.rp-chip {{
+  padding: 5px 12px;
+  border-radius: 16px;
+  border-width: 1px;
+  border-style: solid;
+  border-color: {border};
+  background-color: transparent;
+  background-image: none;
+  color: {dim};
+}}
+.rp-chip:hover {{ background-color: {hover}; color: {fg}; }}
+.rp-chip-t {{ font-size: 12px; }}
+.rp-vol-ic {{ color: {dim}; }}
+.rp-vol > trough > highlight {{ background-color: {a}; }}
+.rp-vol > trough > slider {{
+  min-width: 13px;
+  min-height: 13px;
+  border-radius: 7px;
+}}
 
 /* —— 列表页 —— */
 .rp-headbar {{ background-color: {bg}; }}
@@ -156,6 +214,7 @@ pub fn build_css(dark: bool, accent: Accent) -> String {
   padding: 8px 12px;
   border-radius: 10px;
   background-color: {surface};
+  background-image: none;
   color: inherit;
 }}
 .rp-list {{ background-color: transparent; }}
@@ -191,7 +250,13 @@ pub fn build_css(dark: bool, accent: Accent) -> String {
 .rp-mini .rp-mini-title {{ font-size: 13px; font-weight: 600; }}
 
 /* —— 顶栏按钮/下拉 —— */
-.rp-back {{ min-width: 36px; min-height: 36px; padding: 0; border-radius: 18px; }}
+.rp-back {{
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  border-radius: 18px;
+  background-image: none;
+}}
 .rp-more {{ min-width: 36px; min-height: 36px; padding: 0; border-radius: 18px; }}
 .rp-cat {{ background-color: {surface}; border-radius: 10px; }}
 "#,
@@ -200,6 +265,8 @@ pub fn build_css(dark: bool, accent: Accent) -> String {
         dim = dim,
         hover = hover,
         surface = surface,
+        border = border,
+        green = green,
         a = a,
     )
 }

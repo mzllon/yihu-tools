@@ -92,6 +92,11 @@ pub struct RadioApp {
     meta_label: gtk::Label,
     fav_btn: gtk::Button,
     play_btn: gtk::Button,
+    /// 主播放键的图标（播放/停止切换；自建 Image 才能用 Large 规格）
+    play_img: gtk::Image,
+    /// 正在播行（绿点 + 文案），整行可收起
+    prog_row: gtk::Box,
+    prog_dot: gtk::Label,
     vol_scale: gtk::Scale,
     browse_btns: Vec<gtk::Button>,
     // 列表页
@@ -136,7 +141,10 @@ impl RadioApp {
         win.set_default_size(420, 620);
         win.add_css_class("rp-root");
 
-        // —— 播放页 ——
+        // —— 播放页 ——（尺寸口径 = docs/电台native插件-草图.html 方向 C：
+        // 168 封面卡 / 绿点正在播行 / 40 小圆键 + 58 主播放键 / 入口胶囊 /
+        // 130px 音量。GtkPicture 的 natural 尺寸是原图像素，封面字节必须在
+        // 解码层中心方裁+缩放（decode_cover），否则大图会把整列撑成全宽横幅）
         let cover_pic = gtk::Picture::new();
         cover_pic.set_size_request(168, 168);
         cover_pic.set_content_fit(gtk::ContentFit::Cover);
@@ -148,10 +156,21 @@ impl RadioApp {
         let cover_stack = gtk::Stack::new();
         cover_stack.add_named(&cover_fb, Some("fb"));
         cover_stack.add_named(&cover_pic, Some("pic"));
+        cover_stack.set_halign(gtk::Align::Center);
+        cover_stack.set_valign(gtk::Align::Start);
 
+        let prog_dot = gtk::Label::new(None);
+        prog_dot.add_css_class("rp-dot");
+        prog_dot.set_valign(gtk::Align::Center);
         let prog_label = gtk::Label::new(None);
         prog_label.add_css_class("rp-prog");
         prog_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        let prog_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        prog_row.set_halign(gtk::Align::Center);
+        prog_row.set_margin_top(14);
+        prog_row.append(&prog_dot);
+        prog_row.append(&prog_label);
+
         let title_label = gtk::Label::new(Some("选择一个电台开始收听"));
         title_label.add_css_class("rp-title");
         title_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -161,12 +180,18 @@ impl RadioApp {
 
         let fav_btn = gtk::Button::from_icon_name("non-starred-symbolic");
         fav_btn.add_css_class("rp-ctl");
-        let play_btn = gtk::Button::from_icon_name("media-playback-start");
+        // 同排有 58px 主播放键：不居中会被 Box 纵向拉伸成竖胶囊（探针实测）
+        fav_btn.set_valign(gtk::Align::Center);
+        let play_img = gtk::Image::from_icon_name("media-playback-start");
+        play_img.set_icon_size(gtk::IconSize::Large);
+        let play_btn = gtk::Button::new();
+        play_btn.set_child(Some(&play_img));
         play_btn.add_css_class("rp-play");
 
         let more_btn = gtk::MenuButton::new();
         more_btn.set_icon_name("open-menu-symbolic");
-        more_btn.add_css_class("rp-more");
+        more_btn.add_css_class("rp-ctl");
+        more_btn.set_valign(gtk::Align::Center);
         let quit_btn = gtk::Button::with_label("退出（停播）");
         let pop = gtk::Popover::new();
         pop.set_child(Some(&quit_btn));
@@ -174,36 +199,29 @@ impl RadioApp {
 
         let vol_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
         vol_scale.set_value(80.0);
+        vol_scale.set_size_request(130, -1);
         vol_scale.add_css_class("rp-vol");
-        let vol_icon = gtk::Label::new(Some("🔊"));
-        let vol_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let vol_icon = gtk::Image::from_icon_name("audio-volume-high-symbolic");
+        vol_icon.add_css_class("rp-vol-ic");
+        vol_icon.set_valign(gtk::Align::Center);
+        let vol_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         vol_row.set_halign(gtk::Align::Center);
         vol_row.set_margin_top(14);
         vol_row.append(&vol_icon);
         vol_row.append(&vol_scale);
 
-        let ctl_row = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+        let ctl_row = gtk::Box::new(gtk::Orientation::Horizontal, 22);
         ctl_row.set_halign(gtk::Align::Center);
-        ctl_row.set_margin_top(18);
+        ctl_row.set_valign(gtk::Align::Center);
+        ctl_row.set_margin_top(16);
         ctl_row.append(&fav_btn);
         ctl_row.append(&play_btn);
         ctl_row.append(&more_btn);
 
-        let player_page = gtk::Box::new(gtk::Orientation::Vertical, 10);
-        player_page.set_margin_top(36);
-        player_page.set_margin_bottom(12);
-        player_page.set_valign(gtk::Align::Center);
-        player_page.append(&cover_stack);
-        player_page.append(&prog_label);
-        player_page.append(&title_label);
-        player_page.append(&meta_label);
-        player_page.append(&ctl_row);
-        player_page.append(&vol_row);
-
         let mut browse_btns = Vec::new();
         let entry_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         entry_row.set_halign(gtk::Align::Center);
-        entry_row.set_margin_bottom(10);
+        entry_row.set_margin_top(16);
         for (label, icon) in [
             ("收藏", "non-starred-symbolic"),
             ("分类", "view-list-symbolic"),
@@ -211,12 +229,29 @@ impl RadioApp {
             ("搜索", "system-search-symbolic"),
         ] {
             let b = gtk::Button::new();
-            b.set_icon_name(icon);
+            let ic = gtk::Image::from_icon_name(icon);
+            let lb = gtk::Label::new(Some(label));
+            lb.add_css_class("rp-chip-t");
+            let bx = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            bx.append(&ic);
+            bx.append(&lb);
+            b.set_child(Some(&bx));
             b.set_tooltip_text(Some(label));
-            b.add_css_class("rp-ctl");
+            b.add_css_class("rp-chip");
             entry_row.append(&b);
             browse_btns.push(b);
         }
+
+        let player_page = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        player_page.set_margin_top(26);
+        player_page.set_margin_bottom(12);
+        player_page.set_valign(gtk::Align::Center);
+        player_page.append(&cover_stack);
+        player_page.append(&prog_row);
+        player_page.append(&title_label);
+        player_page.append(&meta_label);
+        player_page.append(&ctl_row);
+        player_page.append(&vol_row);
         player_page.append(&entry_row);
 
         // —— 列表页 ——
@@ -293,6 +328,9 @@ impl RadioApp {
             meta_label,
             fav_btn,
             play_btn,
+            play_img,
+            prog_row,
+            prog_dot,
             vol_scale,
             browse_btns,
             back_btn,
@@ -461,6 +499,10 @@ impl RadioApp {
         }
         *l = key;
         drop(l);
+        // 弹层/滚动条等原生控件跟随系统深浅色（自绘面由上面的 CSS 接管）
+        if let Some(settings) = gtk::Settings::default() {
+            settings.set_gtk_application_prefer_dark_theme(dark);
+        }
         let css = gtk::CssProvider::new();
         css.load_from_string(&crate::theme::build_css(dark, accent));
         gtk::style_context_add_provider_for_display(
@@ -516,7 +558,6 @@ impl RadioApp {
     fn play_channel(&self, ch: &Channel) {
         *self.cur.borrow_mut() = Some(ch.clone());
         self.playing.set(true);
-        self.prog_label.set_text("⏳ 连接中…");
         self.sync_playing_ui();
         let ch = ch.clone();
         let cid = ch.id;
@@ -538,29 +579,39 @@ impl RadioApp {
         self.sync_playing_ui();
     }
 
+    /// 正在播行：绿点 + 文案；空文案整行收起
+    fn set_prog(&self, text: &str, live: bool) {
+        self.prog_dot.set_visible(live);
+        self.prog_label.set_text(text);
+        self.prog_row.set_visible(!text.is_empty());
+    }
+
     /// 播放态 → 控件 + status.json + 迷你条
     fn sync_playing_ui(&self) {
         let cur = self.cur.borrow().clone();
         let playing = self.playing.get();
-        self.play_btn.set_icon_name(if playing {
-            "media-playback-stop"
+        self.play_img.set_icon_name(if playing {
+            Some("media-playback-stop")
         } else {
-            "media-playback-start"
+            Some("media-playback-start")
         });
         if playing {
             if let Some(ch) = &cur {
-                self.mini_title
-                    .set_text(&format!("🔊 {}", display_title(ch)));
+                self.mini_title.set_text(&display_title(ch));
                 self.mini_bar.set_visible(true);
                 self.title_label.set_text(&display_title(ch));
                 self.meta_label.set_text(&ch.meta_line());
-                self.prog_label
-                    .set_text(&if ch.np_line().is_empty() { "⏳ 连接中…".into() } else { ch.np_line() });
+                let np = np_display(ch);
+                if np.is_empty() {
+                    self.set_prog("连接中…", false);
+                } else {
+                    self.set_prog(&format!("正在播 {np}"), true);
+                }
                 store::write_status(true, Some(ch));
             }
         } else {
             self.mini_bar.set_visible(false);
-            self.prog_label.set_text("");
+            self.set_prog("", false);
             self.title_label.set_text(&match &cur {
                 Some(ch) => display_title(ch),
                 None => "选择一个电台开始收听".to_string(),
@@ -573,15 +624,26 @@ impl RadioApp {
     }
 
     fn set_main_cover(&self, ch: &Channel) {
-        let first = display_title(ch).chars().next().unwrap_or('📻');
-        self.cover_fb.set_text(&first.to_string());
+        // 草图口径：封面占位徽标 = 去掉 FM 前缀后的前两字（如「93」「杭州」）
+        let fb: String = display_title(ch)
+            .trim_start_matches("FM")
+            .trim()
+            .chars()
+            .take(2)
+            .collect();
+        self.cover_fb
+            .set_text(&if fb.is_empty() { "📻".to_string() } else { fb });
         let url = ch.cover_url();
         if url.is_empty() {
             self.cover_stack.set_visible_child_name("fb");
             return;
         }
         if let Some(p) = store::cover_cached(ch.id) {
-            match std::fs::read(p).ok().as_deref().map(Self::decode_pixbuf).flatten() {
+            match std::fs::read(p)
+                .ok()
+                .as_deref()
+                .and_then(|b| Self::decode_cover(b, 168, 20))
+            {
                 Some(pix) => {
                     set_picture_pixbuf(&self.cover_pic, &pix);
                     self.cover_stack.set_visible_child_name("pic");
@@ -626,14 +688,25 @@ impl RadioApp {
         });
     }
 
-    /// 字节 → 圆角 Pixbuf（主线程解码；GTK4 无 CSS overflow，圆角在
-    /// 像素层打 alpha 蒙版，半径随边长缩放：168px 主封面 ≈24px，40px 行 ≈10px）
-    fn decode_pixbuf(bytes: &[u8]) -> Option<gtk::gdk_pixbuf::Pixbuf> {
+    /// 字节 → 固定尺寸圆角封面（主线程解码）。GtkPicture 的 natural 尺寸 =
+    /// 图像像素尺寸，布局里没有能钳住它的容器，必须在这里中心方裁 + 缩放到
+    /// 调用方的逻辑像素（主封面 168/r20，行封面 40/r10），natural 恰为目标
+    /// 值——否则大图会把整列撑成全宽横幅（首版返工主因）。
+    fn decode_cover(bytes: &[u8], size: i32, radius: i32) -> Option<gtk::gdk_pixbuf::Pixbuf> {
         let loader = PixbufLoader::new();
         loader.write(bytes).ok()?;
         loader.close().ok()?;
-        let pix = loader.pixbuf()?;
-        Some(round_corners(&pix, (pix.width() / 7).clamp(8, 28)))
+        let src = loader.pixbuf()?;
+        let side = src.width().min(src.height()).max(1);
+        let sq = gtk::gdk_pixbuf::Pixbuf::new_subpixbuf(
+            &src,
+            (src.width() - side) / 2,
+            (src.height() - side) / 2,
+            side,
+            side,
+        );
+        let scaled = sq.scale_simple(size, size, gtk::gdk_pixbuf::InterpType::Bilinear)?;
+        Some(round_corners(&scaled, radius))
     }
 
     fn sync_fav_btn(&self) {
@@ -876,7 +949,7 @@ impl RadioApp {
             if !url.is_empty() {
                 let cached = store::cover_cached(id)
                     .and_then(|p| std::fs::read(p).ok())
-                    .and_then(|b| Self::decode_pixbuf(&b));
+                    .and_then(|b| Self::decode_cover(&b, 40, 10));
                 if let Some(pix) = cached {
                     self.apply_row_cover(id, &pix);
                 } else {
@@ -1041,7 +1114,9 @@ impl RadioApp {
             }
             Event::RowCover { id, bytes } => {
                 self.covers_inflight.borrow_mut().remove(&id);
-                if let Some(pix) = bytes.as_deref().map(Self::decode_pixbuf).flatten() {
+                if let Some(pix) =
+                    bytes.as_deref().and_then(|b| Self::decode_cover(b, 40, 10))
+                {
                     self.apply_row_cover(id, &pix);
                 }
             }
@@ -1049,7 +1124,7 @@ impl RadioApp {
                 self.covers_inflight.borrow_mut().remove(&id);
                 let cur_ok = self.cur.borrow().as_ref().is_some_and(|c| c.id == id);
                 if cur_ok {
-                    match bytes.as_deref().map(Self::decode_pixbuf).flatten() {
+                    match bytes.as_deref().and_then(|b| Self::decode_cover(b, 168, 20)) {
                         Some(pix) => {
                             set_picture_pixbuf(&self.cover_pic, &pix);
                             self.cover_stack.set_visible_child_name("pic");
@@ -1079,7 +1154,7 @@ impl RadioApp {
                         self.playing.set(false);
                         store::write_status(false, None);
                         self.sync_playing_ui();
-                        self.prog_label.set_text(&format!("⚠ {e}"));
+                        self.set_prog(&format!("⚠ {e}"), false);
                     }
                 }
             }
@@ -1119,7 +1194,7 @@ impl RadioApp {
                 self.playing.set(false);
                 store::write_status(false, None);
                 self.sync_playing_ui();
-                self.prog_label.set_text("⚠ 播放已中断");
+                self.set_prog("播放已中断", false);
             }
         }
     }
@@ -1177,4 +1252,12 @@ fn display_title(ch: &Channel) -> String {
     } else {
         ch.title.clone()
     }
+}
+
+/// 正在播节目文本（剥掉 np_line 的 🔴 前缀；绿点由 UI 自己画）
+fn np_display(ch: &Channel) -> String {
+    ch.np_line()
+        .trim_start_matches('🔴')
+        .trim()
+        .to_string()
 }
