@@ -1,5 +1,5 @@
 //! 播放器窗体（方向 C）：主视图大封面 + 正在播 + 大控制键；列表（收藏/
-//! 分类/地区/搜索）收进第二页；播放中底部迷你条常显。
+//! 分类/地区/搜索）收进第二页；播放页承担全部状态展示。
 //!
 //! 线程约定：全部控件只在主线程触碰；网络/播放引擎在 std::thread，结果经
 //! glib 事件通道回主循环（面板同款模式）。窗体可隐藏——close 只是 withdraw，
@@ -106,10 +106,6 @@ pub struct RadioApp {
     region_cat_dd: gtk::DropDown,
     scroller: gtk::ScrolledWindow,
     list: gtk::ListBox,
-    // 迷你条
-    mini_bar: gtk::Box,
-    mini_title: gtk::Label,
-    mini_stop: gtk::Button,
     // 状态
     engine: Arc<Engine>,
     /// 事件槽（线程 push、主循环 30ms 轮询 drain——面板 cap_async 同款）
@@ -299,20 +295,6 @@ impl RadioApp {
         browse_page.append(&region_cat_dd);
         browse_page.append(&scroller);
 
-        // —— 迷你条 ——
-        let mini_title = gtk::Label::new(None);
-        mini_title.add_css_class("rp-mini-title");
-        mini_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        mini_title.set_hexpand(true);
-        mini_title.set_halign(gtk::Align::Start);
-        let mini_stop = gtk::Button::from_icon_name("media-playback-stop");
-        mini_stop.add_css_class("rp-back");
-        let mini_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        mini_bar.add_css_class("rp-mini");
-        mini_bar.append(&mini_title);
-        mini_bar.append(&mini_stop);
-        mini_bar.set_visible(false);
-
         let stack = gtk::Stack::new();
         stack.set_vexpand(true);
         stack.add_named(&player_page, Some("player"));
@@ -320,7 +302,6 @@ impl RadioApp {
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&stack);
-        root.append(&mini_bar);
         win.set_child(Some(&root));
 
         let ra = Rc::new(RadioApp {
@@ -346,9 +327,6 @@ impl RadioApp {
             region_cat_dd,
             scroller,
             list,
-            mini_bar,
-            mini_title,
-            mini_stop,
             engine: Arc::new(Engine::new()),
             slot: Arc::new(Mutex::new(Vec::new())),
             tray_rx: crate::tray::install(),
@@ -405,8 +383,6 @@ impl RadioApp {
                 ra.toggle_fav_channel(&ch);
             }
         });
-        let ra = self.clone();
-        self.mini_stop.connect_clicked(move |_| ra.stop_playing());
         let ra = self.clone();
         self.vol_scale.connect_value_changed(move |s| {
             let v = s.value().round().clamp(0.0, 100.0) as u32;
@@ -657,8 +633,6 @@ impl RadioApp {
         });
         if playing {
             if let Some(ch) = &cur {
-                self.mini_title.set_text(&display_title(ch));
-                self.mini_bar.set_visible(true);
                 self.title_label.set_text(&display_title(ch));
                 self.meta_label.set_text(&ch.meta_line());
                 let np = np_display(ch);
@@ -670,7 +644,6 @@ impl RadioApp {
                 store::write_status(true, Some(ch));
             }
         } else {
-            self.mini_bar.set_visible(false);
             self.set_prog("", false);
             self.title_label.set_text(&match &cur {
                 Some(ch) => display_title(ch),

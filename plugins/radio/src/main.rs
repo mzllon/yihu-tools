@@ -39,7 +39,7 @@ fn main() {
     // ≈ +28MB PSS 且无窗收听也驻留。检测到 Wayland 会话即强制 wayland
     // 后端（X11 会话机器无 WAYLAND_DISPLAY，不受影响）+ cairo 软渲染
     // （电台 UI 静态，软渲染足够，开窗也不引 GL）。
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
         std::env::set_var("GDK_BACKEND", "wayland");
         std::env::set_var("GSK_RENDERER", "cairo");
     }

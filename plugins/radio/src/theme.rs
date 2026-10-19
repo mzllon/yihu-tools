@@ -242,13 +242,6 @@ pub fn build_css(dark: bool, accent: Accent) -> String {
 .rp-star {{ padding: 4px 8px; border-radius: 14px; }}
 .rp-star-fav-on {{ color: {a}; }}
 
-/* —— 底部迷你条 —— */
-.rp-mini {{
-  padding: 8px 12px;
-  border-top: 1px solid {hover};
-}}
-.rp-mini .rp-mini-title {{ font-size: 13px; font-weight: 600; }}
-
 /* —— 顶栏按钮/下拉 —— */
 .rp-back {{
   min-width: 36px;
@@ -288,7 +281,7 @@ mod tests {
     #[test]
     fn css_covers_key_selectors() {
         let css = build_css(true, Accent::Orange);
-        for sel in [".rp-cover", ".rp-play", ".rp-list > row:selected", ".rp-mini", "#e66100"] {
+        for sel in [".rp-cover", ".rp-play", ".rp-list > row:selected", "#e66100"] {
             assert!(css.contains(sel), "缺选择器 {sel}");
         }
         assert!(!build_css(true, Accent::Blue).contains("#fafafa"));
