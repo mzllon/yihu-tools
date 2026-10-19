@@ -9,9 +9,14 @@
 
 mod api;
 mod engine;
+mod fdk;
+mod legacy;
+mod pulse;
 mod store;
+mod stream;
 mod theme;
 mod tray;
+mod tsdemux;
 mod ui;
 
 use std::cell::RefCell;
@@ -21,9 +26,23 @@ use gtk::gio;
 use gtk::prelude::*;
 
 fn main() {
+    // glibc 每线程 malloc arena 上限压到 2：引擎每次换台起停线程组，
+    // 默认「每线程一 arena」会让 touched 页随换台次数缓慢累积
+    // （实测 20 轮换台 +11MB）。电台是低频分配场景，锁竞争无感。
+    unsafe { libc::mallopt(-8 /* M_ARENA_MAX */, 2) };
     // 基座统一日志：文件落盘 + panic 钩子（GTK 回调 panic 即 abort，
     // 没有钩子闪退零现场——BUG-008）。要放最前，探测失败也要留痕。
     yihu_core::pluginlog::init("radio");
+    // 渲染栈瘦身（2026-10-19 实测）：Wayland 会话上若落到 X11 后端
+    // （如 shell 环境残留 GDK_BACKEND=x11），gtk_init 的
+    // gdk_display_prepare_gl 会无条件初始化 EGL，拉进 NVIDIA/Mesa 全家
+    // ≈ +28MB PSS 且无窗收听也驻留。检测到 Wayland 会话即强制 wayland
+    // 后端（X11 会话机器无 WAYLAND_DISPLAY，不受影响）+ cairo 软渲染
+    // （电台 UI 静态，软渲染足够，开窗也不引 GL）。
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        std::env::set_var("GDK_BACKEND", "wayland");
+        std::env::set_var("GSK_RENDERER", "cairo");
+    }
     let app = gtk::Application::builder()
         .application_id("tools.yihu.radio")
         .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
@@ -45,7 +64,7 @@ fn main() {
                 std::process::id(),
                 args
             );
-            // 播放环境探测提前到首帧：缺 gst 组件直接给出可安装提示并退出
+            // 播放环境探测提前到首帧：缺播放组件直接给出可安装提示并退出
             if let Err(e) = engine::Engine::new().probe() {
                 yihu_core::perror!("播放环境探测失败：{e}");
                 eprintln!("radio-player: {e}");

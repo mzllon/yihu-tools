@@ -1,275 +1,208 @@
-//! 播放引擎（播放随插件走）：gst-play-1.0 子进程 + 直播清单本地镜像 +
-//! pactl 单流音量。
+//! 播放引擎（播放随插件走）：纯 Rust 内嵌管线——HLS 清单轮询 → 分片下载
+//! → MPEG-TS 解复用 → fdk-aac 解码（HE-AAC v1/v2）→ PulseAudio 推流。
+//! 取代 gst-play-1.0 子进程（实测省 ~48MB PSS：GStreamer/ffmpeg 全家桶
+//! 不再进内存）。环境变量 `YIHU_RADIO_ENGINE=gst` 回退旧引擎（[`legacy`]）。
 //!
-//! 与面板 player.rs 同源口径（M5 验证的三个关键点原样保留）：
-//! 1. 清单镜像：蜻蜓 HLS 清单里的分片是协议相对地址，GStreamer 的 HLS
-//!    解析器会错误拼接导致 404 无声——镜像线程持续把清单改写为绝对地址
-//!    落本地文件，播放器只消费本地清单。
-//! 2. `--flags=audio`：直播 TS 流被 typefind 识别为 video/mpegts，收窄为
-//!    纯音频，否则拉起黑窗。
-//! 3. 音量语义「与应用音量生效」：pactl 定位本播放进程的 sink-input 单独
-//!    调节，不影响系统与其他应用。
+//! 与面板 player.rs 同源口径（M5 验证的三个关键点的去向）：
+//! 1. 蜻蜓清单协议相对地址 → [`stream::join_url`] 内存内改写（gst 路线
+//!    仍走 /tmp 镜像）。
+//! 2. `--flags=audio` 纯音频收窄 → [`tsdemux`] 只解 PMT 声明的 AAC 音频
+//!    PID（实测本台 TS 另带一路 H.264，正好忽略）。
+//! 3. 音量「与应用音量生效」→ 仍 pactl 定位 sink-input 单独调节；pid
+//!    换成本进程（pulse 流自带 application.process.id）。
 //!
-//! 生命周期差异：引擎在本插件进程内，窗体隐藏不退出、收听不断；真正的
-//! 退出路径（--quit / SIGTERM / 窗内退出）统一走 [`Engine::stop`]。
+//! 生命周期（硬性规则 1/2 合规）：
+//! - 网络与解码全在后台线程组，主线程只读写原子标志与 Mutex，绝不触碰
+//!   线程内部；所有阻塞点有界：ureq 8s 超时、队列等待带 500ms 粒度的
+//!   停止轮询、pulse 按帧背压（每帧 ≤46ms 巡检一次标志）；
+//! - 每次播放一个 [`Session`]，线程只捕获本会话的 Arc——跨会话零共享
+//!   可变状态，以「会话私有」落实 BUG-001 的 (id, gen) 代数隔离教训；
+//! - stop() 不 join：置停标志即返回，线程有界自灭；pulse Sink 落 drop
+//!   时 flush 服务端残余缓冲，停播立即静音。
 
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-use std::time::Duration;
-
-const PLAYER_LOG: &str = "/tmp/yihu-radio-player.log";
-const MIRROR_DIR: &str = "/tmp/yihu-radio-player";
-/// 本地镜像清单路径；播放器消费它，镜像线程持续刷新。
-pub const MIRROR_MANIFEST: &str = "/tmp/yihu-radio-player/live.m3u8";
-/// 清单刷新间隔；蜻蜓直播清单目标分片时长约 7s。
-const MIRROR_INTERVAL: Duration = Duration::from_secs(4);
-
-/// 播放参数；单独抽出便于测试。
-pub fn gst_args(manifest_uri: &str) -> Vec<String> {
-    vec!["--flags=audio".to_owned(), manifest_uri.to_owned()]
-}
-
-/// 把清单中的相对地址改写为绝对地址。
-/// `//host/path` → 补 scheme；`/path` → 补 scheme+host；其余原样保留。
-pub fn absolutize_manifest(manifest: &str, base_uri: &str) -> String {
-    let (scheme, authority) = match base_uri.split_once("://") {
-        Some((scheme, rest)) => {
-            let authority = rest.split('/').next().unwrap_or_default().to_owned();
-            (scheme.to_owned(), authority)
-        }
-        None => ("https".to_owned(), String::new()),
-    };
-    manifest
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_end_matches('\r');
-            if let Some(rest) = trimmed.strip_prefix("//") {
-                format!("{scheme}://{rest}")
-            } else if trimmed.starts_with('/') {
-                format!("{scheme}://{authority}{trimmed}")
-            } else {
-                trimmed.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
-}
-
-/// 原子化写入镜像清单，避免播放器读到半个文件。
-fn write_manifest_atomic(path: &str, text: &str) -> std::io::Result<()> {
-    let path = std::path::Path::new(path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("m3u8.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
-}
-
-/// 阻塞式 GET 文本（清单镜像线程用）。
-fn fetch_text(uri: &str) -> Result<String, String> {
-    let resp = ureq::get(uri)
-        .timeout(Duration::from_secs(8))
-        .call()
-        .map_err(|e| format!("清单获取失败：{e}"))?;
-    let mut text = String::new();
-    resp.into_reader()
-        .take(4 * 1024 * 1024)
-        .read_to_string(&mut text)
-        .map_err(|e| format!("清单读取失败：{e}"))?;
-    Ok(text)
-}
-
+use std::collections::VecDeque;
 use std::io::Read as _;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
-/// 从 `pactl list sink-inputs` 输出中定位属于 pid 的 sink-input 序号。
-pub fn find_sink_input(pactl_output: &str, pid: u32) -> Option<u32> {
-    let needle = format!("application.process.id = \"{pid}\"");
-    pactl_output
-        .split("Sink Input #")
-        .filter_map(|block| {
-            let idx: String = block
-                .chars()
-                .skip_while(|c| !c.is_ascii_digit())
-                .take_while(char::is_ascii_digit)
-                .collect();
-            idx.parse::<u32>().ok().map(|idx| (idx, block))
+use crate::fdk;
+use crate::legacy;
+use crate::legacy::GstEngine;
+use crate::pulse;
+use crate::stream;
+use crate::tsdemux::TsDemux;
+use yihu_core::{perror, pinfo, pwarn};
+
+/// 清单/分片请求超时。
+const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+/// 单请求体上限（分片 ~75KB、清单 <100KB，4MB 是防失控值）。
+const MAX_BODY: u64 = 4 * 1024 * 1024;
+/// 分片队列上限：~7s/片 → 最多积压 ~21s，背压天然限内存。
+const QUEUE_CAP: usize = 3;
+/// 开台到出声的等待上限（与旧引擎 5s 清单口径一致）。
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// 清单缺 TARGETDURATION 时的轮询兜底间隔（秒）。
+const DEFAULT_TARGET: u64 = 4;
+/// 连续失败多少轮判致命（约 3×分片时长 ≈ 20s+，容忍一般网络抖动）。
+const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
+/// 一次播放会话的全部共享状态；线程只持有本会话的 Arc。
+struct Session {
+    stop: AtomicBool,
+    /// is_playing 真值：线程组任一致命退出即置 false。
+    alive: AtomicBool,
+    /// 解码出首帧并写入 pulse（play 的成功判据，比旧「进程活着」更实）。
+    first_frame: AtomicBool,
+    queue: Mutex<VecDeque<Vec<u8>>>,
+    queue_cv: Condvar,
+    /// 清单流结束（ENDLIST/致命），队列不会再有新分片。
+    feed_done: AtomicBool,
+}
+
+impl Session {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            stop: AtomicBool::new(false),
+            alive: AtomicBool::new(true),
+            first_frame: AtomicBool::new(false),
+            queue: Mutex::new(VecDeque::new()),
+            queue_cv: Condvar::new(),
+            feed_done: AtomicBool::new(false),
         })
-        .find(|(_, block)| block.contains(&needle))
-        .map(|(idx, _)| idx)
-}
-
-fn has_command(cmd: &str) -> bool {
-    Command::new(cmd)
-        .arg("--version")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
-}
-
-fn has_gst_element(name: &str) -> bool {
-    Command::new("gst-inspect-1.0")
-        .arg(name)
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
-}
-
-/// 缺失的系统组件（apt 包名）。
-pub fn probe_missing() -> Vec<&'static str> {
-    let mut missing = Vec::new();
-    if !has_command("gst-play-1.0") {
-        missing.push("gstreamer1.0-tools");
     }
-    if !has_gst_element("tsdemux") {
-        missing.push("gstreamer1.0-plugins-bad");
-    }
-    if !has_gst_element("avdec_aac") {
-        missing.push("gstreamer1.0-libav");
-    }
-    if !has_gst_element("pulsesink") {
-        missing.push("gstreamer1.0-plugins-good");
-    }
-    missing
-}
 
-/// 清理本用户遗留的孤儿播放进程（插件进程被 SIGKILL 时 gst-play 会存活）。
-pub fn kill_orphan_players() {
-    let Ok(entries) = std::fs::read_dir("/proc") else { return };
-    let self_uid = std::fs::metadata("/proc/self")
-        .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta))
-        .unwrap_or(u32::MAX);
-    for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
-            continue;
-        };
-        if pid == std::process::id() {
-            continue;
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
+    /// 取下一分片；None = 停止或清单流已结束且取空。
+    fn pop_segment(&self) -> Option<Vec<u8>> {
+        let mut q = self.queue.lock().unwrap();
+        loop {
+            if let Some(seg) = q.pop_front() {
+                return Some(seg);
+            }
+            if self.feed_done.load(Ordering::Acquire) {
+                return None;
+            }
+            if self.stopped() {
+                return None;
+            }
+            let (g, _) = self.queue_cv.wait_timeout(q, Duration::from_millis(500)).unwrap();
+            q = g;
         }
-        let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
-            continue;
-        };
-        if comm.trim() != "gst-play-1.0" {
-            continue;
-        }
-        let owned = std::fs::metadata(format!("/proc/{pid}"))
-            .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta) == self_uid)
-            .unwrap_or(false);
-        if owned {
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .status();
+    }
+
+    /// 入队（满则等待背压）；false = 会话已停止。
+    fn push_segment(&self, seg: Vec<u8>) -> bool {
+        let mut q = self.queue.lock().unwrap();
+        loop {
+            if self.stopped() {
+                return false;
+            }
+            if q.len() < QUEUE_CAP {
+                q.push_back(seg);
+                drop(q);
+                self.queue_cv.notify_one();
+                return true;
+            }
+            let (g, _) = self.queue_cv.wait_timeout(q, Duration::from_millis(500)).unwrap();
+            q = g;
         }
     }
 }
 
 /// 播放引擎（Send + Sync：play 在后台线程调用，其余在主线程）。
 pub struct Engine {
-    child: Mutex<Option<Child>>,
+    legacy: GstEngine,
+    session: Mutex<Option<Arc<Session>>>,
     sink_index: Mutex<Option<u32>>,
-    mirror_stop: Mutex<Option<std::sync::Arc<AtomicBool>>>,
 }
 
 impl Engine {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            legacy: GstEngine::new(),
+            session: Mutex::new(None),
+            sink_index: Mutex::new(None),
+        }
     }
 
-    /// 播放前探测运行环境，缺失时返回可安装的包名列表。
+    /// 播放前探测运行环境，缺失时返回可安装的包名提示。
     pub fn probe(&self) -> Result<(), String> {
-        let missing = probe_missing();
-        if missing.is_empty() {
-            return Ok(());
+        if legacy::enabled() {
+            return self.legacy.probe();
         }
-        let hint = yihu_core::distro::install_hint(&missing);
-        Err(format!("缺少播放组件：{}（{}）", missing.join("、"), hint))
-    }
-
-    /// 播放 `stream_url`：清孤儿与陈旧清单，启动镜像线程，首份新清单落地
-    /// 后拉起 gst-play。**阻塞可达 5s——只能在后台线程调用**。
-    pub fn play(&self, stream_url: &str) -> Result<(), String> {
-        self.probe()?;
-        self.stop();
-        kill_orphan_players();
-        // 陈旧清单会让播放器拉起后拉到 404 旧分片（表现为无声），必须删除。
-        let _ = std::fs::remove_file(MIRROR_MANIFEST);
-
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        *self.mirror_stop.lock().unwrap() = Some(stop.clone());
-        let stream_url = stream_url.to_owned();
-        let stop_for_thread = stop.clone();
-        std::thread::Builder::new()
-            .name("radio-mirror".into())
-            .spawn(move || loop {
-                match fetch_text(&stream_url) {
-                    Ok(text) => {
-                        let fixed = absolutize_manifest(&text, &stream_url);
-                        let _ = write_manifest_atomic(MIRROR_MANIFEST, &fixed);
-                    }
-                    Err(e) => {
-                        yihu_core::pwarn!("清单镜像获取失败：{e}");
-                    }
-                }
-                if stop_for_thread.load(Ordering::Acquire) {
-                    break;
-                }
-                std::thread::sleep(MIRROR_INTERVAL);
-            })
-            .map_err(|e| format!("无法启动清单镜像：{e}"))?;
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while std::fs::metadata(MIRROR_MANIFEST).is_err() {
-            if std::time::Instant::now() > deadline {
-                stop.store(true, Ordering::Release);
-                return Err("直播清单获取失败，请检查网络后重试".to_owned());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        self.spawn_player();
-        if !self.is_playing() {
-            return Err("播放器启动失败，详见 /tmp/yihu-radio-player.log".to_owned());
+        fdk::Lib::acquire()?;
+        if pulse::Lib::load().is_none() {
+            let hint = yihu_core::distro::install_hint(&["libpulse0"]);
+            return Err(format!("缺少播放组件：libpulse（{hint}）"));
         }
         Ok(())
     }
 
-    fn spawn_player(&self) {
-        let manifest_uri = format!("file://{MIRROR_MANIFEST}");
-        let log = std::fs::create_dir_all(MIRROR_DIR).ok().and_then(|_| {
-            std::fs::File::create(PLAYER_LOG).ok()
-        });
-        let mut cmd = Command::new("gst-play-1.0");
-        cmd.args(gst_args(&manifest_uri))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null());
-        match log {
-            // 同进程组：本插件退出路径能连 gst-play 一起收掉
-            Some(log) => cmd.stderr(Stdio::from(log)),
-            None => cmd.stderr(Stdio::null()),
-        };
-        *self.child.lock().unwrap() = cmd.spawn().ok();
+    /// 播放 `stream_url`：起清单/解码线程组，等首帧出声（上限 5s）才返回
+    /// Ok。**阻塞可达 5s——只能在后台线程调用**（与旧引擎调用面一致）。
+    pub fn play(&self, stream_url: &str) -> Result<(), String> {
+        if legacy::enabled() {
+            return self.legacy.play(stream_url);
+        }
+        self.stop();
+        // 过渡期清理：升级前旧版本可能遗留 gst-play 孤儿（插件被 SIGKILL 时）。
+        legacy::kill_orphan_players();
+
+        let lib = fdk::Lib::acquire()?;
+        let session = Session::new();
+        *self.session.lock().unwrap() = Some(session.clone());
+
+        let url = stream_url.to_owned();
+        let s = session.clone();
+        std::thread::Builder::new()
+            .name("radio-fetch".into())
+            .spawn(move || fetch_loop(&url, s))
+            .map_err(|e| format!("无法启动清单线程：{e}"))?;
+        let s = session.clone();
+        std::thread::Builder::new()
+            .name("radio-decode".into())
+            .spawn(move || decode_loop(s, lib))
+            .map_err(|e| format!("无法启动解码线程：{e}"))?;
+
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        while Instant::now() < deadline {
+            if session.first_frame.load(Ordering::Acquire) {
+                // 新流新 sink-input，音量待 UI 恢复时重新解析
+                *self.sink_index.lock().unwrap() = None;
+                return Ok(());
+            }
+            if !session.alive.load(Ordering::Acquire) {
+                self.stop();
+                return Err("播放器启动失败，详见 ~/.local/share/yihu/logs/radio.log".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.stop();
+        Err("直播清单获取失败，请检查网络后重试".to_owned())
     }
 
-    /// false 表示播放进程已退出；原因见 `PLAYER_LOG`。
+    /// false 表示播放已中断/停止；原因见插件日志。
     pub fn is_playing(&self) -> bool {
-        let mut slot = self.child.lock().unwrap();
-        match slot.as_mut() {
-            Some(child) => match child.try_wait() {
-                Ok(Some(_)) | Err(_) => {
-                    *slot = None;
-                    false
-                }
-                Ok(None) => true,
-            },
+        if legacy::enabled() {
+            return self.legacy.is_playing();
+        }
+        match self.session.lock().unwrap().as_ref() {
+            Some(s) => s.alive.load(Ordering::Acquire),
             None => false,
         }
     }
 
-    /// 单独调节本播放流音量（0–100）。
+    /// 单独调节本播放流音量（0–100）。音频在本进程内，pid 即自身。
     pub fn set_volume(&self, pct: u32) {
-        let pid = self.child.lock().unwrap().as_ref().map(Child::id);
-        let Some(pid) = pid else { return };
+        if legacy::enabled() {
+            return self.legacy.set_volume(pct);
+        }
+        let pid = std::process::id();
         let mut sink = self.sink_index.lock().unwrap();
         if sink.is_none() {
             let resolved = Command::new("pactl")
@@ -279,7 +212,7 @@ impl Engine {
                 .output()
                 .ok()
                 .filter(|out| out.status.success())
-                .map(|out| find_sink_input(&String::from_utf8_lossy(&out.stdout), pid))
+                .map(|out| legacy::find_sink_input(&String::from_utf8_lossy(&out.stdout), pid))
                 .unwrap_or(None);
             *sink = resolved;
         }
@@ -297,26 +230,22 @@ impl Engine {
         }
     }
 
-    /// 停播：镜像线程退出 + 子进程收割。
+    /// 停播：置停标志 + 唤醒队列即返回（线程有界自灭；Sink drop 时 flush）。
     pub fn stop(&self) {
-        if let Some(stop) = self.mirror_stop.lock().unwrap().take() {
-            stop.store(true, Ordering::Release);
+        if legacy::enabled() {
+            return self.legacy.stop();
         }
         *self.sink_index.lock().unwrap() = None;
-        if let Some(mut child) = self.child.lock().unwrap().take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(s) = self.session.lock().unwrap().take() {
+            s.stop.store(true, Ordering::Release);
+            s.queue_cv.notify_all();
         }
     }
 }
 
 impl Default for Engine {
     fn default() -> Self {
-        Self {
-            child: Mutex::new(None),
-            sink_index: Mutex::new(None),
-            mirror_stop: Mutex::new(None),
-        }
+        Self::new()
     }
 }
 
@@ -326,58 +255,248 @@ impl Drop for Engine {
     }
 }
 
+/// 线程组致命退出：记日志、清 alive（UI 2s 巡检据此报「播放已中断」）。
+fn fatal(s: &Session, why: &str) {
+    perror!("电台播放中断：{why}");
+    s.alive.store(false, Ordering::Release);
+    s.feed_done.store(true, Ordering::Release);
+    s.queue_cv.notify_all();
+}
+
+/// 可中断睡眠：200ms 粒度响应停止标志。
+fn sleep_interruptible(s: &Session, d: Duration) {
+    let deadline = Instant::now() + d;
+    while Instant::now() < deadline {
+        if s.stopped() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// 阻塞式 GET 文本（清单用）。
+fn fetch_text(uri: &str) -> Result<String, String> {
+    let resp = ureq::get(uri)
+        .timeout(FETCH_TIMEOUT)
+        .call()
+        .map_err(|e| format!("清单获取失败：{e}"))?;
+    let mut text = String::new();
+    resp.into_reader()
+        .take(MAX_BODY)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("清单读取失败：{e}"))?;
+    Ok(text)
+}
+
+/// 阻塞式 GET 二进制（分片用）。
+fn fetch_segment(uri: &str) -> Result<Vec<u8>, String> {
+    let resp = ureq::get(uri)
+        .timeout(FETCH_TIMEOUT)
+        .call()
+        .map_err(|e| format!("分片获取失败：{uri}：{e}"))?;
+    let mut v = Vec::new();
+    resp.into_reader()
+        .take(MAX_BODY)
+        .read_to_end(&mut v)
+        .map_err(|e| format!("分片读取失败：{uri}：{e}"))?;
+    Ok(v)
+}
+
+/// 清单线程：轮询直播清单、追新分片、下载入队（容量背压）。
+fn fetch_loop(url: &str, s: Arc<Session>) {
+    // 已入队分片的「绝对序号上界」（media_sequence + 已见分片数）。
+    let mut emitted_total: Option<u64> = None;
+    let mut failures: u32 = 0;
+    let mut target = DEFAULT_TARGET;
+
+    while !s.stopped() {
+        match fetch_text(url) {
+            Ok(text) => {
+                failures = 0;
+                let pl = stream::parse_playlist(&text, url);
+                if pl.target_duration > 0 {
+                    target = pl.target_duration;
+                }
+                // 直播追边：首发从倒数第 2 片起（留 1 片缓冲余量），
+                // 之后按绝对序号增量取新片（服务器可能裁掉旧片，夹取合法区间）。
+                let total = pl.media_sequence + pl.segments.len() as u64;
+                let start_idx = match emitted_total {
+                    None => (pl.segments.len() as u64).saturating_sub(2),
+                    Some(prev) => prev.saturating_sub(pl.media_sequence).min(pl.segments.len() as u64),
+                };
+                let mut all_enqueued = true;
+                for seg in &pl.segments[start_idx as usize..] {
+                    if s.stopped() {
+                        return;
+                    }
+                    match fetch_segment(seg) {
+                        Ok(bytes) => {
+                            if !s.push_segment(bytes) {
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            pwarn!("{e}，等下轮清单重试");
+                            all_enqueued = false;
+                            break;
+                        }
+                    }
+                }
+                if all_enqueued {
+                    emitted_total = Some(total);
+                } else {
+                    failures += 1;
+                    if failures >= MAX_CONSECUTIVE_FAILURES {
+                        fatal(&s, "连续拉流失败");
+                        return;
+                    }
+                }
+                if pl.end_list {
+                    s.feed_done.store(true, Ordering::Release);
+                    s.queue_cv.notify_all();
+                    return;
+                }
+            }
+            Err(e) => {
+                pwarn!("{e}");
+                failures += 1;
+                if failures >= MAX_CONSECUTIVE_FAILURES {
+                    fatal(&s, "连续拉流失败");
+                    return;
+                }
+            }
+        }
+        sleep_interruptible(&s, Duration::from_secs((target / 2).clamp(2, 7)));
+    }
+}
+
+/// 解码线程：分片出队 → TS 解复用 → fdk 解码 → pulse 推流。
+fn decode_loop(s: Arc<Session>, lib: Arc<fdk::Lib>) {
+    let Some(mut dec) = fdk::Decoder::new(lib.clone()) else {
+        fatal(&s, "解码器初始化失败");
+        return;
+    };
+    let Some(plib) = pulse::Lib::load() else {
+        fatal(&s, "缺少 libpulse-simple");
+        return;
+    };
+    let mut demux = TsDemux::new();
+    let mut sink: Option<pulse::Sink> = None;
+    let mut adts: Vec<u8> = Vec::with_capacity(128 * 1024);
+    let mut pcm = vec![0i16; fdk::PCM_CAP];
+
+    'session: while !s.stopped() {
+        let Some(seg) = s.pop_segment() else { break };
+        demux.push(&seg, &mut adts);
+
+        loop {
+            if s.stopped() {
+                break 'session;
+            }
+            let mut view: &[u8] = &adts;
+            let outcome = dec.decode(&mut view, &mut pcm);
+            adts.drain(..adts.len() - view.len());
+            match outcome {
+                fdk::Decoded::NeedMore => break,
+                fdk::Decoded::Frame => {
+                    if dec.take_spec_changed() || sink.is_none() {
+                        // 先 drop 旧流（flush 清残余）再按新规格连接
+                        sink = None;
+                        match pulse::Sink::connect(plib.clone(), dec.sample_rate, dec.channels) {
+                            Some(sk) => sink = Some(sk),
+                            None => {
+                                fatal(&s, "无法连接音频输出（pulse）");
+                                break 'session;
+                            }
+                        }
+                    }
+                    let n = dec.frame_size * dec.channels as usize;
+                    if let Some(sk) = &sink {
+                        if !sk.write(&pcm[..n.min(pcm.len())]) {
+                            fatal(&s, "音频输出断开");
+                            break 'session;
+                        }
+                    }
+                    if !s.first_frame.swap(true, Ordering::AcqRel) {
+                        pinfo!(
+                            "电台出声：{}Hz {}声道 帧长{}（fdk-aac 内嵌引擎）",
+                            dec.sample_rate,
+                            dec.channels,
+                            dec.frame_size
+                        );
+                    }
+                }
+                fdk::Decoded::Conceal => {} // 单帧损坏，跳过继续
+                fdk::Decoded::Fatal(e) => {
+                    fatal(&s, &format!("解码失败 0x{e:04X}"));
+                    break 'session;
+                }
+            }
+        }
+    }
+
+    // 正常清单完结（ENDLIST）也按中断上报，让 UI 状态一致。
+    if !s.stopped() {
+        s.alive.store(false, Ordering::Release);
+    }
+    drop(sink); // flush：停播立即静音
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 真实分片的全管线预检（默认忽略）：TS 解复用 → fdk-aac 解码。
+    /// 跑法：抓一个直播分片存为 /tmp/probe-seg.ts（收听时从镜像清单取
+    /// 首个分片 URL 下载），然后
+    /// `cargo test -p radio-player -- --ignored --nocapture`。
+    /// 断言的是 2026-10-19 实测的蜻蜓 64k 流形态（HE-AAC v1：LC 核心
+    /// 22050Hz，SBR 输出 44100Hz 双声道）；若失败提示重核
+    /// docs/电台引擎去GStreamer化.md 的编码结论。
     #[test]
-    fn builds_player_args() {
+    #[ignore = "需要本地真实分片 /tmp/probe-seg.ts"]
+    fn 真实分片_demux_解码对拍() {
+        let seg = std::fs::read("/tmp/probe-seg.ts").expect("先抓取分片到 /tmp/probe-seg.ts");
+
+        let mut demux = TsDemux::new();
+        let mut adts = Vec::new();
+        demux.push(&seg, &mut adts);
+        assert!(!adts.is_empty(), "TS 解复用无输出");
+        println!("ADTS 载荷 {} 字节，glitches {}", adts.len(), demux.glitches);
+
+        let lib = fdk::Lib::acquire().expect("libfdk-aac（含 SBR）未就绪");
+        let mut dec = fdk::Decoder::new(lib).expect("解码器初始化失败");
+        let mut pcm = vec![0i16; fdk::PCM_CAP];
+        let mut frames = 0u32;
+        let mut conceal = 0u32;
+        let mut specs = std::collections::BTreeMap::new();
+        loop {
+            let mut view: &[u8] = &adts;
+            let outcome = dec.decode(&mut view, &mut pcm);
+            adts.drain(..adts.len() - view.len());
+            match outcome {
+                fdk::Decoded::Frame => {
+                    frames += 1;
+                    *specs
+                        .entry((dec.sample_rate, dec.channels, dec.frame_size))
+                        .or_insert(0u32) += 1;
+                    if frames == 1 {
+                        println!("首帧规格：{}Hz {}ch 帧长{}", dec.sample_rate, dec.channels, dec.frame_size);
+                    }
+                }
+                fdk::Decoded::NeedMore => break,
+                fdk::Decoded::Conceal => conceal += 1,
+                fdk::Decoded::Fatal(e) => panic!("解码致命错误 0x{e:04X}"),
+            }
+        }
+        println!("共解码 {frames} 帧，conceal {conceal}，规格分布 {specs:?}");
+        assert!(frames > 140, "帧数异常：{frames}");
         assert_eq!(
-            gst_args("file:///tmp/yihu-radio-player/live.m3u8"),
-            vec![
-                "--flags=audio".to_owned(),
-                "file:///tmp/yihu-radio-player/live.m3u8".to_owned()
-            ]
+            specs.len(), 1,
+            "规格应全程一致（SBR 激活后 44100/2048）"
         );
-    }
-
-    #[test]
-    fn absolutizes_protocol_relative_uris() {
-        let manifest = "#EXTM3U\n#EXTINF:7.01,\n//ls-hw-ot.qtfm.cn/live/1133/64k/a.ts\n";
-        let fixed = absolutize_manifest(manifest, "https://ls.qingting.fm/live/1133/64k.m3u8");
-        assert!(fixed.contains("https://ls-hw-ot.qtfm.cn/live/1133/64k/a.ts"));
-        assert!(fixed.starts_with("#EXTM3U"));
-    }
-
-    #[test]
-    fn absolutizes_root_relative_and_keeps_absolute() {
-        let manifest = "/live/1133/64k/a.ts\nhttps://cdn.example.com/b.ts\n#EXTM3U\n";
-        let fixed = absolutize_manifest(manifest, "https://ls.qingting.fm/live/x.m3u8");
-        assert!(fixed.contains("https://ls.qingting.fm/live/1133/64k/a.ts"));
-        assert!(fixed.contains("https://cdn.example.com/b.ts"));
-    }
-
-    #[test]
-    fn fresh_engine_reports_stopped_and_stop_is_safe() {
-        let engine = Engine::new();
-        assert!(!engine.is_playing());
-        engine.stop();
-        assert!(!engine.is_playing());
-    }
-
-    #[test]
-    fn locates_sink_input_by_pid() {
-        let out = "\
-Sink Input #267
-	Specification: ...
-	application.process.id = \"999\"
-
-Sink Input #268
-	Specification: ...
-	application.process.id = \"598467\"
-";
-        assert_eq!(find_sink_input(out, 598467), Some(268));
-        assert_eq!(find_sink_input(out, 1), None);
-        assert_eq!(find_sink_input("", 598467), None);
+        assert_eq!(dec.sample_rate, 44100, "SBR 输出采样率");
+        assert_eq!(dec.frame_size, 2048, "HE-AAC 帧长");
+        assert_eq!(dec.channels, 2);
     }
 }
