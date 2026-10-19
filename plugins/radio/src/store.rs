@@ -118,6 +118,36 @@ pub fn write_status(playing: bool, ch: Option<&Channel>) {
     }
 }
 
+/// 上次播放的台（status.json 的 channel 非空时返回）。注意 stop 会按契约
+/// 把 channel 置 null，所以这里通常只在进程异常退出后才有值——空状态恢复
+/// 播放的兜底主要靠收藏（ui::play_default）。
+pub fn read_last_channel() -> Option<Channel> {
+    let text = std::fs::read_to_string(data_dir().join("status.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    channel_from_status(&v)
+}
+
+fn channel_from_status(v: &serde_json::Value) -> Option<Channel> {
+    let c = v.get("channel")?;
+    let id = c.get("id")?.as_i64()?;
+    if id == 0 {
+        return None;
+    }
+    let mut ch = Channel::default();
+    ch.id = id;
+    ch.title = c
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+    ch.cover = c
+        .get("cover")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(ch)
+}
+
 // ---- 关窗提示（只提示一次）----
 
 pub fn hide_hint_shown() -> bool {
@@ -226,5 +256,24 @@ mod tests {
         });
         assert_eq!(doc["playing"], true);
         assert_eq!(doc["channel"]["id"], 3);
+    }
+
+    #[test]
+    fn last_channel_from_status() {
+        // 正常文档 / channel 为 null（stop 后契约态）/ id=0 全覆盖
+        let doc = serde_json::json!({
+            "playing": true,
+            "channel": {"id": 1133, "title": "杭州交通91.8电台", "cover": "http://x/y.png"},
+        });
+        let ch = channel_from_status(&doc).expect("应有频道");
+        assert_eq!(ch.id, 1133);
+        assert_eq!(ch.title, "杭州交通91.8电台");
+        assert_eq!(ch.cover_url(), "http://x/y.png");
+
+        let stopped = serde_json::json!({"playing": false, "channel": null});
+        assert!(channel_from_status(&stopped).is_none());
+
+        let zero = serde_json::json!({"playing": true, "channel": {"id": 0, "title": "x"}});
+        assert!(channel_from_status(&zero).is_none());
     }
 }

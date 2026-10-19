@@ -153,6 +153,12 @@
   `set_valign(Center)`；③ 所有自绘按钮补 `background-image: none`；
   ④ 补 `.rp-ctl > button` 规则。验证：探针打印 allocated 尺寸（42×42 /
   60×60）+ Xwayland 真窗截图逐项对齐草图。
+- **追加（同日二轮验收）**：① 空状态漏显绿点——正在播行构建时默认可见，
+  只在 set_prog 时才收起；已改为构建即隐藏。② 空状态点播放无响应——
+  toggle_play 在 cur=None 时静默空转；补 play_default 恢复链：status.json
+  的 channel（异常退出残留）→ 第一个收藏 → 提示文案。教训同上：空状态
+  也是一帧完整 UI，验收要连空状态一起截图。
+
 - **教训**：
   1. GTK4 的「CSS 写了没生效」要先分三类：没解析（看 stderr warning）、
      被更高优先级 provider 覆盖、还是被**默认主题的另一种绘制手段**

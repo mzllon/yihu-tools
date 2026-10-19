@@ -149,7 +149,7 @@ impl RadioApp {
         cover_pic.set_size_request(168, 168);
         cover_pic.set_content_fit(gtk::ContentFit::Cover);
         cover_pic.add_css_class("rp-cover");
-        let cover_fb = gtk::Label::new(None);
+        let cover_fb = gtk::Label::new(Some("📻"));
         cover_fb.set_size_request(168, 168);
         cover_fb.set_valign(gtk::Align::Center);
         cover_fb.add_css_class("rp-cover-fallback");
@@ -168,6 +168,8 @@ impl RadioApp {
         let prog_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         prog_row.set_halign(gtk::Align::Center);
         prog_row.set_margin_top(14);
+        // 空状态整行收起（漏显绿点返工：dot 默认可见，行也默认可见）
+        prog_row.set_visible(false);
         prog_row.append(&prog_dot);
         prog_row.append(&prog_label);
 
@@ -552,6 +554,24 @@ impl RadioApp {
             self.stop_playing();
         } else if let Some(ch) = self.cur.borrow().clone() {
             self.play_channel(&ch);
+        } else {
+            self.play_default();
+        }
+    }
+
+    /// 空状态点播放：恢复上次播放的台，没有则取第一个收藏；都没有才提示
+    fn play_default(&self) {
+        let from_favs = || {
+            self.favs.borrow().first().map(|f| {
+                let mut c = Channel::default();
+                c.id = f.id;
+                c.title = f.title.clone();
+                c
+            })
+        };
+        match store::read_last_channel().or_else(from_favs) {
+            Some(ch) => self.play_channel(&ch),
+            None => self.set_prog("先从下方收藏 / 分类 / 搜索选一个电台", false),
         }
     }
 
