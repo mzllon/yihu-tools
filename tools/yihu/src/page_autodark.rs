@@ -195,8 +195,15 @@ pub fn build_page() -> gtk::Widget {
     switch_card.append(&apply_row);
 
     // ============ 双模式选中卡 ============
-    let mode_row = GtkBox::new(Orientation::Horizontal, 14);
-    mode_row.set_homogeneous(true);
+    // WrapBox 而非横向 homogeneous Box：后者行最小宽 = 最宽卡 ×2，曾把窗口
+    // 最小宽顶到 ~1050（开窗即超默认且缩不小）；WrapBox 窄时自动堆叠、
+    // 宽时并排且等宽，视觉不变而最小宽降为单卡
+    let mode_row = adw::WrapBox::builder()
+        .orientation(Orientation::Horizontal)
+        .child_spacing(14)
+        .line_spacing(14)
+        .line_homogeneous(true)
+        .build();
 
     let rb_custom = CheckButton::with_label("自定义时间");
     let rb_sun = CheckButton::with_label("日出至日落");
@@ -277,10 +284,12 @@ pub fn build_page() -> gtk::Widget {
     main_box.set_margin_start(24);
     main_box.set_margin_end(24);
     main_box.set_valign(Align::Start);
-    for c in [&switch_card, &mode_row] {
+    for c in [&switch_card] {
         c.set_hexpand(true);
         main_box.append(c);
     }
+    mode_row.set_hexpand(true);
+    main_box.append(&mode_row);
 
     let ui = Rc::new(Ui {
         enable_switch: enable_switch.clone(),

@@ -252,9 +252,16 @@ fn install_row(placeholder: &str) -> (Entry, Button) {
 }
 
 /// 权限徽章行：短名 pill + 中文说明 tooltip（含参数，如「访问网络
-/// api.x.com」「写文件 ~/.config/…」）；空权限显示「无权限」灰徽章
-fn perm_badges(perms: &[String]) -> GtkBox {
-    let row = GtkBox::new(Orientation::Horizontal, 4);
+/// api.x.com」「写文件 ~/.config/…」）；空权限显示「无权限」灰徽章。
+/// 用 WrapBox 自动换行——横向 Box 的行最小宽度 = 全部 pill 之和，会一路
+/// 顶进 Stack/窗口最小宽（电台 8 条权限曾把窗口撑到 ~3400px 且缩不小）；
+/// pill 另加省略上限兜底，超长参数以 tooltip 兜底展示
+fn perm_badges(perms: &[String]) -> adw::WrapBox {
+    let row = adw::WrapBox::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .child_spacing(6)
+        .line_spacing(4)
+        .build();
     if perms.is_empty() {
         let l = Label::new(Some("无权限"));
         l.add_css_class("perm-badge");
@@ -265,6 +272,8 @@ fn perm_badges(perms: &[String]) -> GtkBox {
     for p in perms {
         let l = Label::new(Some(p));
         l.add_css_class("perm-badge");
+        l.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        l.set_max_width_chars(38);
         l.set_tooltip_text(Some(&yihu_core::permissions::label(p)));
         row.append(&l);
     }
