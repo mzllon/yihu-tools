@@ -162,3 +162,8 @@ panel.wasm 只读。窗口打开动作：面板行激活 → 宿主 spawn entry�
 
 - W6：本件实现（含 kind=native 扫描/纳管/mini 壳协议的最小落地）；
   W8 的 schedule/native 规范化随本件经验回写。
+- **状态（2026-10-19）：已落地。** kind=native/panel_entry 解析与纳管、
+  radio-player（方向 C 窗体 + 清单镜像播放引擎 + 收藏沿用 + status.json 契约）、
+  panel.wasm mini 壳（入口行/状态行/面板直搜即播）全部就位；宿主 67 +
+  radio-player 15 + core 56 测试全过。真机验收项：搜「电台」出行→回车开窗、
+  分类/地区/搜索/收藏、关窗后台续播提示、插件中心卡片与「停止」。

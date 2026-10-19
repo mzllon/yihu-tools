@@ -1,23 +1,28 @@
 id = "radio"
 name = "电台"
-version = "1.1.0"
+version = "2.0.0-native"
 api = "^1"
-entry = "radio.py"
+kind = "native"
+entry = "radio-player"
 icon = "applications-multimedia-symbolic"
-# 常驻：面板收起不杀（播放由宿主代执行，本会话保持可控制）；空闲自退在
-# 宿主播放期间整体跳过（sessions sweep），收听不受 300s 空闲限制。
-resident = true
+# 面板出行入口（mini 壳，WASM 运行时承载）：控制台入口行 / 正在播状态行 /
+# 面板直搜即播。窗体进程由激活动作按需拉起（GApplication 单实例转发）。
+panel_entry = "panel.wasm"
 
-
-# 沙箱无网无声：分类/频道/搜索走 network.fetch，播放/音量/停止走宿主
-# audio.*（gst-play 子进程 + 清单镜像在宿主侧，见 panel/player.rs）。
-# 收藏存插件自己的数据目录（/data），无需任何 fs 能力。
+# native 官方可信直连：permissions 是能力契约的展示与审计对照（不经能力
+# 代理强制）；panel.wasm 的能力面（network.fetch 搜索 + fs.read 状态）按
+# 同一声明装载期校验。
+# 注意 permissions 必须位于任何 [[triggers]] 段之前（TOML 段归属约定）。
 permissions = [
     "network.fetch@rapi.qtfm.cn",
+    "network.fetch@rapi.qingting.fm",
     "network.fetch@search.qingting.fm",
+    "network.fetch@ls.qingting.fm",
+    "network.fetch@pic.qtfm.cn",
     "audio.play@ls.qingting.fm",
     "audio.stop",
     "audio.volume",
+    "fs.read@~/.local/share/yihu/plugin-data/radio/status.json",
 ]
 
 [[triggers]]

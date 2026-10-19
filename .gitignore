@@ -7,3 +7,6 @@ dist/
 tools/sysdash/target/
 __pycache__/
 plugins/cronkit/wasm/target/
+plugins/cronkit/wasm/target/
+plugins/theme-switch/target/
+plugins/radio/wasm/target/

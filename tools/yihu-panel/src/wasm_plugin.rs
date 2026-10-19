@@ -29,6 +29,7 @@ const MAX_UIS: usize = 8;
 const MAX_RESPONSE_BYTES: usize = 768 * 1024;
 
 /// 面板结果行（与 app::PanelEntry 字段对齐，避免循环依赖用自有类型）
+#[derive(Debug)]
 pub struct WasmRow {
     pub title: String,
     pub subtitle: String,
@@ -646,6 +647,88 @@ mod tests {
         assert!(rows.len() == 6 && rows[0].title.contains("每天"));
         // 非本插件查询静默
         assert!(reg.query("cronkit", "hello world").unwrap().is_empty());
+    }
+
+    #[test]
+    fn radio_panel_shell_query_and_async_rows() {
+        // W6 mini 壳端到端：入口行 + 状态行异步刷新 + 直搜占位/回包
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../plugins/radio/wasm/target/wasm32-unknown-unknown/release/radio_panel_wasm.wasm",
+        );
+        if !p.exists() {
+            eprintln!("跳过：radio panel.wasm 未构建");
+            return;
+        }
+        let declared = vec![
+            "network.fetch@search.qingting.fm".to_string(),
+            "fs.read@~/.local/share/yihu/plugin-data/radio/status.json".to_string(),
+        ];
+        let mut reg = WasmRegistry::default();
+        assert!(reg.ensure_loaded("radio", &p, &declared).unwrap());
+
+        // ① 裸词头：入口行 + fs.read 状态请求
+        let rows = reg.query("radio", "电台").unwrap();
+        assert_eq!(rows.len(), 1, "入口行，实际 {rows:?}");
+        assert!(rows[0].title.contains("电台控制台"));
+        assert_eq!(rows[0].payload, "open");
+        let drained = reg.drain_all();
+        let caps = &drained.iter().find(|(id, _)| id == "radio").unwrap().1.caps;
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].capability, "fs.read");
+        assert_eq!(
+            caps[0].params["path"],
+            "~/.local/share/yihu/plugin-data/radio/status.json"
+        );
+        // 状态回包：正在播 → 状态行置顶
+        // 执行器契约：data 一律 JSON 引号包裹（spawn_fsread_job 同款）
+        let status = serde_json::to_string(
+            &serde_json::json!({
+                "playing": true,
+                "channel": {"id": 1133, "title": "杭州交通91.8电台", "cover": ""},
+                "updated_at": 0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        reg.deliver_response("radio", caps[0].request_id, true, "", Some(&status))
+            .unwrap()
+            .unwrap();
+        let rows = reg.take_results("radio").unwrap().unwrap();
+        assert_eq!(rows.len(), 2, "状态行+入口行，实际 {rows:?}");
+        assert!(rows[0].title.contains("正在播放"));
+        assert_eq!(rows[0].payload, "stop");
+
+        // ② 直搜：占位行 + network.fetch 请求
+        let rows = reg.query("radio", "电台 交通").unwrap();
+        assert!(rows[0].title.contains("搜索"), "{rows:?}");
+        let drained = reg.drain_all();
+        let caps = &drained.iter().find(|(id, _)| id == "radio").unwrap().1.caps;
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].capability, "network.fetch");
+        assert!(caps[0].params["url"]
+            .as_str()
+            .unwrap()
+            .contains("k=%E4%BA%A4%E9%80%9A"));
+        // 搜索回包：channel_live 过滤 + play payload
+        let search = serde_json::to_string(
+            &serde_json::json!({
+                "errcode": 0,
+                "data": {"data": {"docs": [
+                    {"id": 1133, "title": "杭州交通91.8电台", "type": "channel_live",
+                     "audience_count": 584054},
+                {"id": 9, "title": "某播客", "type": "channel_ondemand"}
+                ]}}}
+            )
+            .to_string(),
+        )
+        .unwrap();
+        reg.deliver_response("radio", caps[0].request_id, true, "", Some(&search))
+            .unwrap()
+            .unwrap();
+        let rows = reg.take_results("radio").unwrap().unwrap();
+        assert_eq!(rows.len(), 1, "点播被滤掉，实际 {rows:?}");
+        assert!(rows[0].title.contains("杭州交通"));
+        assert_eq!(rows[0].payload, "play:1133|杭州交通91.8电台");
     }
 
     #[test]

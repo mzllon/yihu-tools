@@ -85,8 +85,11 @@
 `GET rapi.qingting.fm/v2/livechannelplaying?ids={逗号分隔}&current_time={epoch}`
 ——批量正在播（多频道一次查）。用户决策（2026-10-19）不采用；单频道正在播
 用 §2 列表自带 nowplaying 或 §8 详情。
-另 `GET rapi.qingting.fm/v4/channels/{id}` = 频道详情（墨鱼 FM 在用；字段结构
-待实现时实测校验一次，确认正在播与码率信息）。
+另 `GET rapi.qingting.fm/v4/channels/{id}` = 频道详情，**2026-10-19 已实测**：
+`{errcode, errmsg, data:{id, title, cover, description, nowplaying{id,duration,
+start_time,end_time,name,title,broadcasters[]}, audience_count,
+top_category_id, top_category_title, region{id,title,pid}, city{...}, clout}}`
+——正在播节目 + 分类/城市/听众元信息齐全，播放页元信息与节目周期刷新的数据源。
 
 ## 8. 防御注意（实现硬性要求）
 

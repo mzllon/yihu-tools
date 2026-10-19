@@ -1,1 +1,0 @@
-/home/ming-tang/Documents/Self/yihu-tools/plugins/theme-switch/target/wasm32-unknown-unknown/release/theme_switch_wasm.wasm: /home/ming-tang/Documents/Self/yihu-tools/crates/yihu-wasm-runtime/src/cap.rs /home/ming-tang/Documents/Self/yihu-tools/crates/yihu-wasm-runtime/src/lib.rs /home/ming-tang/Documents/Self/yihu-tools/plugins/theme-switch/src/lib.rs
