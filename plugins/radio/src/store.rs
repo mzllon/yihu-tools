@@ -114,7 +114,7 @@ pub fn write_status(playing: bool, ch: Option<&Channel>) {
         "updated_at": now,
     });
     if let Err(e) = write_atomic(&data_dir().join("status.json"), &doc.to_string()) {
-        eprintln!("[电台] status.json 写入失败：{e}");
+        yihu_core::pwarn!("status.json 写入失败：{e}");
     }
 }
 

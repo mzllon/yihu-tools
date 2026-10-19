@@ -168,3 +168,38 @@
      （valign/halign Center）。
   3. 视觉交付必须实机截图验收，样式表「看起来对」不算数；一次性探针
      example（渲染变体 + 打印 allocated 尺寸）是定位这类问题的最快路径。
+
+---
+
+## BUG-008 电台续播闪退（if-let 守卫的 RefCell 借用跨入 borrow_mut + GTK 回调 panic 即 abort）
+
+- **日期**：2026-10-19（用户实测报告「暂停后再点播放，一会儿窗口就不见了」）
+- **现象**：播放中点播放键暂停正常；稍后再点播放续播，进程直接消失，无任何
+  提示、无任何日志（stderr 随启动方式丢弃）。现场 stderr 恰好被 nohup 截到：
+  `ui.rs:579: RefCell already borrowed` + `panic in a function that cannot
+  unwind`，栈全是 g_signal_emit。
+- **根因**（两个机制叠加）：
+  1. `toggle_play` 的续播分支写作 `else if let Some(ch) = self.cur.borrow().clone()`
+     ——Rust 2021 里 **if-let 守卫的临时 `Ref` 活到整条 if-let 语句结束**
+     （含 else 块），于是带着 `cur` 的共享借用进入守卫体内的
+     `play_channel()`，其第一行 `cur.borrow_mut()` 必然 `RefCell already
+     borrowed`。全文件清查出同款第二处：地区页分类下拉回调（守卫借
+     `mode`，`enter_channels` 里 `mode.borrow_mut()`）。
+  2. panic 发生在 GTK 信号回调里，**跨 FFI 不可 unwind，直接 abort**——
+     进程瞬死且默认零日志。
+- **为什么此前没发现**：交付验证全走 `--play` 命令行（dispatch 直达
+  `play_channel`，不经过 `toggle_play` 的 if-let）；「暂停后按钮续播」这条
+  唯一会踩雷的路径从第一版起就没被任何验证覆盖过。
+- **修复**：两处改为先取值再分支（statement 级 clone，进函数前 Ref 已释放）；
+  dispatch 新增 `--toggle`（播放/停止切换）让该路径可自动化回归
+  （`--play` → `--toggle` → `--toggle` 即原崩溃序列，实测不崩且 gst-play
+  重生）；顺带给 2s 巡检加 5s 保护窗（续播瞬间旧 gst-play 尚在退出、
+  新进程未就位会误报「引擎退出」闪 UI）。
+- **教训**：
+  1. Rust 2021 的 if-let 守卫临时借用不是「用完即弃」，守卫体内严禁再动
+     同一 RefCell（2024 edition 已收紧作用域，但本仓库是 2021，靠纪律）。
+  2. GTK 回调 panic = abort = 无现场，除非挂了 panic 钩子。基座统一日志
+     `yihu-core::pluginlog`（pinfo/pwarn/perror + 512KiB 轮转 + panic
+     backtrace 落盘）就此成为 native 插件标配，入口一行 `init(id)`。
+  3. 交付验证必须同时覆盖命令行路径与 UI 交互路径——本次按钮路径完全
+     没测过；`--toggle` 这类调试入口就是为把 UI 路径变成可自动化而加。

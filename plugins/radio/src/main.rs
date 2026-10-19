@@ -20,6 +20,9 @@ use gtk::gio;
 use gtk::prelude::*;
 
 fn main() {
+    // 基座统一日志：文件落盘 + panic 钩子（GTK 回调 panic 即 abort，
+    // 没有钩子闪退零现场——BUG-008）。要放最前，探测失败也要留痕。
+    yihu_core::pluginlog::init("radio");
     let app = gtk::Application::builder()
         .application_id("tools.yihu.radio")
         .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
@@ -35,8 +38,15 @@ fn main() {
             .skip(1)
             .collect();
         if s.borrow().is_none() {
+            // 主实例首次建窗才记启动行（CLI 转发进程也会进本函数，别刷屏）
+            yihu_core::pinfo!(
+                "radio-player 主实例启动 pid={} args={:?}",
+                std::process::id(),
+                args
+            );
             // 播放环境探测提前到首帧：缺 gst 组件直接给出可安装提示并退出
             if let Err(e) = engine::Engine::new().probe() {
+                yihu_core::perror!("播放环境探测失败：{e}");
                 eprintln!("radio-player: {e}");
                 let _ = std::process::Command::new("notify-send")
                     .args(["--app-name=一呼电台", &e])

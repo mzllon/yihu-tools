@@ -209,7 +209,7 @@ impl Engine {
                         let _ = write_manifest_atomic(MIRROR_MANIFEST, &fixed);
                     }
                     Err(e) => {
-                        eprintln!("[电台] 清单镜像获取失败：{e}");
+                        yihu_core::pwarn!("清单镜像获取失败：{e}");
                     }
                 }
                 if stop_for_thread.load(Ordering::Acquire) {

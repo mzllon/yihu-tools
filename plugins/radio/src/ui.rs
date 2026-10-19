@@ -117,6 +117,9 @@ pub struct RadioApp {
     quit_btn: gtk::Button,
     cur: RefCell<Option<Channel>>,
     playing: Cell<bool>,
+    /// 最近一次发起播放的时刻：2s 巡检的保护窗——续播瞬间旧 gst-play 尚在
+    /// 退出、新进程还没就位，巡检会误报「引擎退出」闪一下 UI
+    play_started: Cell<std::time::Instant>,
     favs: RefCell<Vec<store::Fav>>,
     mode: RefCell<Mode>,
     history: RefCell<Vec<Mode>>,
@@ -349,6 +352,7 @@ impl RadioApp {
             quit_btn,
             cur: RefCell::new(None),
             playing: Cell::new(false),
+            play_started: Cell::new(std::time::Instant::now()),
             favs: RefCell::new(store::load_favs()),
             mode: RefCell::new(Mode::Player),
             history: RefCell::new(Vec::new()),
@@ -416,12 +420,12 @@ impl RadioApp {
         // 地区页分类下拉：已进入某地区列表时切换分类 → 重拉
         let ra = self.clone();
         self.region_cat_dd.connect_selected_notify(move |_| {
-            if let Mode::RegionList { region, name, .. } = ra.mode.borrow().clone() {
+            // 先取值再分支（BUG-008 同款）：守卫内 enter_channels 会
+            // borrow_mut mode，if-let 的临时借用还活着时必炸
+            let mode = ra.mode.borrow().clone();
+            if let Mode::RegionList { region, name, .. } = mode {
                 let cat = ra.selected_cat_id();
-                ra.enter_channels(
-                    Mode::RegionList { region, name: name.clone(), cat },
-                    &name,
-                );
+                ra.enter_channels(Mode::RegionList { region, name: name.clone(), cat }, &name);
             }
         });
 
@@ -443,10 +447,14 @@ impl RadioApp {
             glib::Propagation::Stop
         });
 
-        // 周期任务：播放进程巡检（2s）/ 正在播刷新（120s）/ 主题跟随（3s）
+        // 周期任务：播放进程巡检（2s；刚发起播放 5s 内豁免，避免续播瞬间
+        // 旧 gst-play 尚在退出而误报）/ 正在播刷新（120s）/ 主题跟随（3s）
         let ra = self.clone();
         glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-            if ra.playing.get() && !ra.engine.is_playing() {
+            if ra.playing.get()
+                && ra.play_started.get().elapsed() > std::time::Duration::from_secs(5)
+                && !ra.engine.is_playing()
+            {
                 ra.on_event(Event::EngineDied);
             }
             glib::ControlFlow::Continue
@@ -534,6 +542,9 @@ impl RadioApp {
                 self.play_channel(&ch);
             }
             Some("--stop") => self.stop_playing(),
+            // 播放/停止切换（面板/快捷键可用；也是 BUG-008 回归验证入口：
+            // 复现路径 = 暂停后再 toggle，走 if-let 续播分支）
+            Some("--toggle") => self.toggle_play(),
             Some("--quit") => self.quit(),
             // 无参 / --open / 其他：开窗置前（single dispatch 语义）
             _ => {
@@ -543,6 +554,7 @@ impl RadioApp {
     }
 
     pub fn quit(&self) {
+        yihu_core::pinfo!("quit（停播退出）");
         self.stop_playing();
         self.app.quit();
     }
@@ -552,10 +564,16 @@ impl RadioApp {
     fn toggle_play(&self) {
         if self.playing.get() {
             self.stop_playing();
-        } else if let Some(ch) = self.cur.borrow().clone() {
-            self.play_channel(&ch);
         } else {
-            self.play_default();
+            // 先取值再分支（BUG-008）：if-let 守卫里的临时借用会活到整条
+            // 语句结束，带着 cur 的共享借用调 play_channel 的 borrow_mut
+            // 会 RefCell 已借用 panic——GTK 回调里 panic 不可 unwind 直接
+            // abort（闪退且无现场，除非挂了 pluginlog 钩子）
+            let cur = self.cur.borrow().clone();
+            match cur {
+                Some(ch) => self.play_channel(&ch),
+                None => self.play_default(),
+            }
         }
     }
 
@@ -576,8 +594,10 @@ impl RadioApp {
     }
 
     fn play_channel(&self, ch: &Channel) {
+        yihu_core::pinfo!("play id={} title={}", ch.id, display_title(ch));
         *self.cur.borrow_mut() = Some(ch.clone());
         self.playing.set(true);
+        self.play_started.set(std::time::Instant::now());
         self.sync_playing_ui();
         let ch = ch.clone();
         let cid = ch.id;
@@ -593,6 +613,7 @@ impl RadioApp {
     }
 
     fn stop_playing(&self) {
+        yihu_core::pinfo!("stop（用户停止/切换）");
         self.playing.set(false);
         self.engine.stop();
         store::write_status(false, None);
@@ -749,7 +770,7 @@ impl RadioApp {
         let mut favs = self.favs.borrow_mut();
         store::toggle_fav(&mut favs, ch);
         if let Err(e) = store::save_favs(&favs) {
-            eprintln!("[电台] 收藏保存失败：{e}");
+            yihu_core::perror!("收藏保存失败：{e}");
         }
         drop(favs);
         self.sync_fav_btn();
@@ -1156,6 +1177,7 @@ impl RadioApp {
             Event::Played { res, ch } => {
                 match res {
                     Ok(()) => {
+                        yihu_core::pinfo!("played ok id={} title={}", ch.id, ch.title);
                         // 保留本次播放台的完整信息（详情回包可能尚未到）
                         let mut merged = ch.clone();
                         if let Some(c) = self.cur.borrow().as_ref() {
@@ -1171,6 +1193,7 @@ impl RadioApp {
                         self.sync_playing_ui();
                     }
                     Err(e) => {
+                        yihu_core::pwarn!("played 失败 id={}：{e}", ch.id);
                         self.playing.set(false);
                         store::write_status(false, None);
                         self.sync_playing_ui();
@@ -1211,6 +1234,7 @@ impl RadioApp {
                 // 详情刷新失败静默：保留旧正在播信息
             }
             Event::EngineDied => {
+                yihu_core::pwarn!("播放引擎进程退出（直播流中断）");
                 self.playing.set(false);
                 store::write_status(false, None);
                 self.sync_playing_ui();

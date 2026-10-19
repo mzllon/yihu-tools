@@ -12,9 +12,29 @@ pub mod mdrender;
 pub mod panel;
 pub mod paths;
 pub mod permissions;
+pub mod pluginlog;
 pub mod plugins;
 pub mod sun;
 pub mod zipfile;
+
+/// 插件统一日志·信息级：`yihu_core::pinfo!("...{}", x)`（文件 + stderr 双写，
+/// 插件入口先调 [`pluginlog::init`]，见 [`pluginlog`]）。
+#[macro_export]
+macro_rules! pinfo {
+    ($($arg:tt)+) => { $crate::pluginlog::write("INFO", format_args!($($arg)+)) };
+}
+
+/// 插件统一日志·警告级。
+#[macro_export]
+macro_rules! pwarn {
+    ($($arg:tt)+) => { $crate::pluginlog::write("WARN", format_args!($($arg)+)) };
+}
+
+/// 插件统一日志·错误级。
+#[macro_export]
+macro_rules! perror {
+    ($($arg:tt)+) => { $crate::pluginlog::write("ERROR", format_args!($($arg)+)) };
+}
 
 use serde::Serialize;
 use std::ffi::CString;

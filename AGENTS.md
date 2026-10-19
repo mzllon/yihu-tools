@@ -41,6 +41,7 @@ busctl --user call tools.yihu.ShellPlacer /tools/yihu/ShellPlacer tools.yihu.She
 6. **呼出路径零 IO**——应用枚举/历史/配置只在启动或后台线程做，呼出（toggle→显示）路径保持零 IO。
 7. **安装目录与打包通道**——用户机器上的二进制在 `~/.local/lib/yihu/`，正式更新走 `scripts/reinstall.sh` 的打包校验；开发迭代可直接替换该目录二进制后重启守护进程验证。
 8. **重命名/迁移数据路径**必须提供迁移脚本并保留回滚（见 `scripts/migrate-yihu-data.sh` 先例：默认 dry-run、sha256 校验、时间戳备份）。
+9. **GTK 回调里 panic = 进程 abort（跨 FFI 不可 unwind）**——`if let … = cell.borrow().clone()` 的临时借用活到整条语句（Rust 2021），守卫体内再动同一 `RefCell` 必 `RefCell already borrowed`（BUG-008）：先取值再分支。native 插件入口必须 `yihu_core::pluginlog::init(id)`（统一文件日志 + panic 钩子落盘，闪退才有现场），日志用 `pinfo!/pwarn!/perror!`。
 
 ## 提交与文档约定
 
