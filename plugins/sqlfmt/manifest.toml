@@ -5,7 +5,8 @@ api = "^1"
 entry = "sqlfmt.wasm"
 icon = "accessories-text-editor"
 
-[[triggers]]
-keywords = ["sql", "格式化"]
 
 permissions = []
+
+[[triggers]]
+keywords = ["sql", "格式化"]

@@ -5,7 +5,8 @@ api = "^1"
 entry = "passgen.wasm"
 icon = "dialog-password"
 
-[[triggers]]
-keywords = ["pass", "密码"]
 
 permissions = []
+
+[[triggers]]
+keywords = ["pass", "密码"]

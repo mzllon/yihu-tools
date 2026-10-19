@@ -50,6 +50,21 @@ pub struct Manifest {
 /// 解析并校验 manifest。校验项：id/name/entry 非空、id 字符集、
 /// api range 与宿主协议主版本匹配。
 pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
+    // TOML 段归属防御（BUG-005）：permissions 写在 [[triggers]] 之后会被
+    // 归入 triggers 子表，顶层静默为空 → 插件以零权限运行、一切能力请求
+    // 被拒且无任何提示。检出即拒绝（fail-loud），逼作者摆正段位置。
+    if let Ok(v) = toml::from_str::<toml::Value>(text) {
+        let trapped = v
+            .get("triggers")
+            .and_then(|t| t.as_array())
+            .map(|arr| arr.iter().any(|e| e.get("permissions").is_some()))
+            .unwrap_or(false);
+        if trapped {
+            return Err(
+                "permissions 写在了 [[triggers]] 段内（TOML 段归属）：必须移到任何 [[triggers]] 之前，否则权限静默为空".into(),
+            );
+        }
+    }
     let mut m: Manifest = toml::from_str(text).map_err(|e| format!("manifest 解析失败：{e}"))?;
     if m.id.is_empty() || !m.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return Err(format!("id 非法（须为小写字母/数字/-）：{:?}", m.id));
@@ -389,6 +404,44 @@ label = "纯数字"
         assert_eq!(m.triggers[0].keywords, vec!["ts", "时间戳"]);
         assert_eq!(m.triggers[1].regex, "^\\d{10}$");
         assert!(m.permissions.is_empty());
+    }
+
+    #[test]
+    fn manifest_rejects_permissions_inside_triggers() {
+        // BUG-005：permissions 落在 [[triggers]] 段内 = 顶层静默为空，
+        // 插件以零权限运行。必须拒载并指明错因。
+        let broken = r#"
+id = "radio"
+name = "电台"
+api = "^1"
+entry = "radio.py"
+
+[[triggers]]
+keywords = ["radio", "电台"]
+
+permissions = [
+    "network.fetch@rapi.qtfm.cn",
+    "audio.play@ls.qingting.fm",
+]
+"#;
+        let e = parse_manifest(broken).unwrap_err();
+        assert!(e.contains("[[triggers]]"), "{e}");
+        // 摆正段位置后通过，权限照常生效
+        let fixed = r#"
+id = "radio"
+name = "电台"
+api = "^1"
+entry = "radio.py"
+permissions = [
+    "network.fetch@rapi.qtfm.cn",
+    "audio.play@ls.qingting.fm",
+]
+
+[[triggers]]
+keywords = ["radio", "电台"]
+"#;
+        let m = parse_manifest(fixed).unwrap();
+        assert_eq!(m.permissions.len(), 2);
     }
 
     #[test]

@@ -5,7 +5,8 @@ api = "^1"
 entry = "cronkit.wasm"
 icon = "view-refresh-symbolic"
 
-[[triggers]]
-keywords = ["cron", "crontab", "定时"]
 
 permissions = []
+
+[[triggers]]
+keywords = ["cron", "crontab", "定时"]

@@ -291,6 +291,12 @@ def main():
             payload = msg.get("payload") or ""
             if payload == "stop":
                 stop_play(from_window=False)
+            elif payload == "open":
+                # 打开控制台（宿主按插件去重：重复 open 原地重建不闪窗）。
+                # 分类懒加载——首次打开才拉，回来后原地刷新出全部分类。
+                show(rows_for_source())
+                if CATS is None:
+                    req("cats", 0, "network.fetch", {"url": CATS_URL})
             elif payload.startswith("play:"):
                 cid_s, _, title = payload[5:].partition("|")
                 if cid_s.isdigit():
@@ -302,12 +308,19 @@ def main():
         elif t == "query":
             text = (msg.get("text") or "").strip()
             low = text.lower()
-            # 查询全量广播：只认电台词头
+            # 查询全量广播：只认电台词头。关键词命中 → 面板出行，回车才开
+            # 控制台（此前在 query 里直接弹窗：每次击键/重复查询都发 ui.show，
+            # 宿主一查一窗，「输入即弹窗」体验也不合理——BUG-005 连带）
             if low in HINTS:
-                if CATS is None:
-                    req("cats", 0, "network.fetch", {"url": CATS_URL})
-                else:
-                    show(rows_for_source())
+                qid = msg.get("id", 0)
+                items = []
+                stop_row = panel_stop_row()
+                if stop_row:
+                    items.append(stop_row)
+                items.append({"title": "📻 电台控制台",
+                              "subtitle": "分类浏览 / 搜索 / 音量（回车打开）",
+                              "payload": "!open"})
+                send({"type": "results", "query_id": qid, "items": items})
             else:
                 # 电台 <关键词> → 面板列表直出搜台结果（回车即播）；
                 # 电台 停止/暂停 → 播放状态行（回车停止）

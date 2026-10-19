@@ -5,7 +5,8 @@ api = "^1"
 entry = "csvkit.wasm"
 icon = "x-office-spreadsheet"
 
-[[triggers]]
-keywords = ["csv", "csvjson", "转换"]
 
 permissions = []
+
+[[triggers]]
+keywords = ["csv", "csvjson", "转换"]

@@ -5,7 +5,8 @@ api = "^1"
 entry = "devcodec"
 icon = "applications-utilities"
 
-[[triggers]]
-keywords = ["codec", "编码", "base", "base64", "b64", "hash", "哈希", "jwt", "hex", "bin"]
 
 permissions = []
+
+[[triggers]]
+keywords = ["codec", "编码", "base", "base64", "b64", "hash", "哈希", "jwt", "hex", "bin"]

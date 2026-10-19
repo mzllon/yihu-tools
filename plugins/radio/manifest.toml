@@ -8,8 +8,6 @@ icon = "applications-multimedia-symbolic"
 # 宿主播放期间整体跳过（sessions sweep），收听不受 300s 空闲限制。
 resident = true
 
-[[triggers]]
-keywords = ["radio", "电台", "广播", "fm", "收音机"]
 
 # 沙箱无网无声：分类/频道/搜索走 network.fetch，播放/音量/停止走宿主
 # audio.*（gst-play 子进程 + 清单镜像在宿主侧，见 panel/player.rs）。
@@ -21,3 +19,6 @@ permissions = [
     "audio.stop",
     "audio.volume",
 ]
+
+[[triggers]]
+keywords = ["radio", "电台", "广播", "fm", "收音机"]

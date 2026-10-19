@@ -5,7 +5,8 @@ api = "^1"
 entry = "randgen.wasm"
 icon = "applications-games"
 
-[[triggers]]
-keywords = ["rand", "随机数", "random", "uuid"]
 
 permissions = []
+
+[[triggers]]
+keywords = ["rand", "随机数", "random", "uuid"]

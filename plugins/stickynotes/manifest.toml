@@ -5,9 +5,10 @@ api = "^1"
 entry = "stickynotes.py"
 icon = "emblem-documents-symbolic"
 
-[[triggers]]
-keywords = ["sticky", "便签", "note"]
 
 # 便签钉窗：宿主 WebKit 便签窗（TOAST UI 所见即所得，Markdown 格式），
 # id 寻址本插件数据目录 stickies/<id>.md——内容归插件，桌面编辑自动存回
 permissions = ["sticky.pin", "sticky.close"]
+
+[[triggers]]
+keywords = ["sticky", "便签", "note"]

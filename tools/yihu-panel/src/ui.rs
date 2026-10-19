@@ -63,7 +63,11 @@ enum Field {
 
 struct UiWindow {
     win: Window,
-    ui_id: u64,
+    /// 归属插件 id：去重 key（协议 ui_id 是各插件自计数，跨插件会撞号，
+    /// 不能做全局 key——BUG-005 连带发现）
+    plugin: String,
+    /// 当前 ui_id（原地重建会更新；Cell 让既有按钮闭包免改）
+    ui_id: std::cell::Cell<u64>,
     /// 字段控件（原地重建时整体替换；闭包持 Rc 读取最新值）
     fields: RefCell<Vec<(String, Field)>>,
 }
@@ -98,17 +102,10 @@ impl PluginId for Window {
     }
 }
 
-/// 关闭指定 ui_id 的窗口（会话死亡时兜底；不发 cancel——插件已死）
-pub fn close(ui_id: u64) {
+/// 按窗口身份移除出打开表（关闭语义由调用方决定；不发 cancel）
+fn remove_open(w: &Rc<UiWindow>) {
     OPEN.with(|o| {
-        o.borrow_mut().retain(|w| {
-            if w.ui_id == ui_id {
-                w.win.close();
-                false
-            } else {
-                true
-            }
-        })
+        o.borrow_mut().retain(|x| !Rc::ptr_eq(x, w));
     });
 }
 
@@ -518,14 +515,17 @@ pub fn show(
 ) -> Result<(), String> {
     let built = build_content(spec)?;
 
+    // 每插件一窗：同插件重复 show = 原地重建（协议 ui_id 是插件自计数，
+    // 每次弹窗都会递增，按它去重永远不命中——一查一窗的根源，BUG-005）
     let existing = OPEN.with(|o| {
         o.borrow()
             .iter()
-            .find(|w| w.ui_id == ui_id)
+            .find(|w| w.plugin == plugin)
             .map(Rc::clone)
     });
     if let Some(w) = existing {
         // 原地重建：标题/内容/字段整体替换，闭包持同一 Rc 读最新字段
+        w.ui_id.set(ui_id);
         w.win.set_title(Some(&built.title));
         w.win.set_child(Some(&built.root));
         *w.fields.borrow_mut() = built.fields;
@@ -534,8 +534,8 @@ pub fn show(
             let w = w.clone();
             let on_event = on_event.clone();
             cancel.connect_clicked(move |_| {
-                on_event(w.ui_id, "cancel", String::new());
-                close(w.ui_id);
+                on_event(w.ui_id.get(), "cancel", String::new());
+                remove_open(&w);
             });
         }
         if let Some(submit) = built.submit {
@@ -545,8 +545,8 @@ pub fn show(
                 let values = collect_values(&w.fields.borrow());
                 let json = serde_json::to_string(&serde_json::Value::Object(values))
                     .unwrap_or_else(|_| "{}".into());
-                on_event(w.ui_id, "submit", json);
-                close(w.ui_id);
+                on_event(w.ui_id.get(), "submit", json);
+                remove_open(&w);
             });
         }
         return Ok(());
@@ -561,7 +561,8 @@ pub fn show(
 
     let w = Rc::new(UiWindow {
         win,
-        ui_id,
+        plugin: plugin.to_string(),
+        ui_id: std::cell::Cell::new(ui_id),
         fields: RefCell::new(built.fields),
     });
 
@@ -569,8 +570,8 @@ pub fn show(
         let w = w.clone();
         let on_event = on_event.clone();
         cancel.connect_clicked(move |_| {
-            on_event(w.ui_id, "cancel", String::new());
-            close(w.ui_id);
+            on_event(w.ui_id.get(), "cancel", String::new());
+            remove_open(&w);
         });
     }
     if let Some(submit) = built.submit {
@@ -580,8 +581,8 @@ pub fn show(
             let values = collect_values(&w.fields.borrow());
             let json = serde_json::to_string(&serde_json::Value::Object(values))
                 .unwrap_or_else(|_| "{}".into());
-            on_event(w.ui_id, "submit", json);
-            close(w.ui_id);
+            on_event(w.ui_id.get(), "submit", json);
+            remove_open(&w);
         });
     }
     wire_actions(&w, built.actions, &on_event);
@@ -592,8 +593,8 @@ pub fn show(
         let wc_win = wc.win.clone();
         let on_event = on_event.clone();
         wc_win.connect_close_request(move |_| {
-            on_event(wc.ui_id, "cancel", String::new());
-            OPEN.with(|o| o.borrow_mut().retain(|x| x.ui_id != wc.ui_id));
+            on_event(wc.ui_id.get(), "cancel", String::new());
+            remove_open(&wc);
             glib::Propagation::Proceed
         });
     }
@@ -616,7 +617,7 @@ fn wire_actions(
             let values = collect_values(&w.fields.borrow());
             let json = serde_json::to_string(&serde_json::Value::Object(values))
                 .unwrap_or_else(|_| "{}".into());
-            on_event(w.ui_id, &format!("action:{key}"), json);
+            on_event(w.ui_id.get(), &format!("action:{key}"), json);
         });
     }
 }

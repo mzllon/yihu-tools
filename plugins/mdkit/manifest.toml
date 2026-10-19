@@ -5,9 +5,10 @@ api = "^1"
 entry = "mdkit.py"
 icon = "text-editor-symbolic"
 
-[[triggers]]
-keywords = ["md", "markdown"]
 
 # 渲染经宿主 pulldown-cmark（浏览器预览 = 写临时页 + gio open，不引 WebKit）；
 # 笔记存插件数据目录 /data/notes/，无需 fs 能力。
 permissions = ["md.render", "md.view"]
+
+[[triggers]]
+keywords = ["md", "markdown"]
