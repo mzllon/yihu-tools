@@ -20,11 +20,12 @@
 //! - stop() 不 join：置停标志即返回，线程有界自灭；pulse Sink 落 drop
 //!   时 flush 服务端残余缓冲，停播立即静音。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read as _;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::fdk;
@@ -39,14 +40,18 @@ use yihu_core::{perror, pinfo, pwarn};
 const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 /// 单请求体上限（分片 ~75KB、清单 <100KB，4MB 是防失控值）。
 const MAX_BODY: u64 = 4 * 1024 * 1024;
-/// 分片队列上限：~7s/片 → 最多积压 ~21s，背压天然限内存。
-const QUEUE_CAP: usize = 3;
+/// 分片队列上限：8s/片 → 稳态缓冲 ~64s。实测「贴直播边跑」（起点
+/// 倒数 2 片 + 队列 3）时队列深度常年 0-1 片，供给停顿 >16s（解析
+/// 挂起/TCP 抖动/CDN 切换）即静默中断（BUG-010）。
+const QUEUE_CAP: usize = 8;
 /// 开台到出声的等待上限（与旧引擎 5s 清单口径一致）。
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// 清单缺 TARGETDURATION 时的轮询兜底间隔（秒）。
 const DEFAULT_TARGET: u64 = 4;
-/// 连续失败多少轮判致命（约 3×分片时长 ≈ 20s+，容忍一般网络抖动）。
+/// 连续失败多少轮判致命（约 3×分片时长，容忍一般网络抖动）。
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+/// 首发起点落后直播边的片数（≈48s 缓冲，吸收供给停顿）。
+const START_LAG: u64 = 6;
 
 /// 一次播放会话的全部共享状态；线程只持有本会话的 Arc。
 struct Session {
@@ -274,10 +279,127 @@ fn sleep_interruptible(s: &Session, d: Duration) {
     }
 }
 
+/// 共享 HTTP Agent：连接池复用（分片不再每片一次 TLS 握手），
+/// 且读写超时只在 Agent 级生效——BUG-010：`.timeout()` 只覆盖到响应头，
+/// body 读取的读超时是 `timeout_read`，Request 快捷构建器上根本没有
+/// 这个旋钮；不设 = None = 半死连接上 read_to_end 永久阻塞，fetch
+/// 线程挂死不喂分片 → 静默无声且 UI 仍显示播放中。
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout(FETCH_TIMEOUT)
+            .timeout_read(FETCH_TIMEOUT)
+            .resolver(CachingResolver::default())
+            .build()
+    })
+}
+
+/// 带缓存的 DNS 解析器（BUG-011）。
+///
+/// 根因：分片 CDN 域名 `ls-hw-ot.qtfm.cn` 是 5 级 CNAME 长链，经公共
+/// DNS（resolv.conf 223.5.5.5）解析**间歇性挂起 10–40s**（丢包重试 ×
+/// 多级 A/AAAA 查询；实测 20 次解析 4 分钟跑不完），而 ureq 的一切
+/// 超时都不覆盖 getaddrinfo——分片供给断流 → 队列耗尽 → 静默无声
+/// （UI 仍显示播放中），且 stop() 时线程卡在解析里残留。
+///
+/// 策略：缓存命中（10 分钟内）直接用；有旧值就先用旧值、过期由后台
+/// 线程刷新（stale-while-revalidate，解析挂多久都不断流）；仅首次
+/// 阻塞解析。解析失败时手里有任何旧值都用旧值（CDN 的 IP 很少变，
+/// 对网络电台远比报错温柔）。地址按 v4 优先排序——本机无 IPv6 出口
+/// 时 v6 地址 connect 必立即 ENETUNREACH，排在前面只会白白消耗重试。
+#[derive(Default, Clone)]
+struct CachingResolver {
+    cache: std::sync::Arc<Mutex<HashMap<String, (Instant, Vec<SocketAddr>)>>>,
+}
+
+/// DNS 缓存寿命；过期值仍可作为兜底返回（stale-while-revalidate）。
+const DNS_TTL: Duration = Duration::from_secs(600);
+
+impl ureq::Resolver for CachingResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+        let mut cache = self.cache.lock().unwrap();
+        if let Some((at, addrs)) = cache.get(netloc) {
+            if at.elapsed() < DNS_TTL {
+                return Ok(addrs.clone());
+            }
+            // 过期：旧值先行，后台刷新（解析挂多久都不断流）
+            let addrs = addrs.clone();
+            let netloc = netloc.to_owned();
+            let resolver = self.clone();
+            std::thread::Builder::new()
+                .name("radio-dns".into())
+                .spawn(move || {
+                    if let Ok(fresh) = resolve_blocking(&netloc) {
+                        resolver.store(&netloc, fresh);
+                    }
+                })
+                .ok();
+            return Ok(addrs);
+        }
+        // 首次：阻塞解析（有界性由 OS 的 DNS 重试机制决定，无旧值可救）
+        let addrs = resolve_blocking(netloc)?;
+        cache.insert(netloc.to_owned(), (Instant::now(), addrs.clone()));
+        Ok(addrs)
+    }
+}
+
+fn resolve_blocking(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+    let started = Instant::now();
+    let mut addrs: Vec<SocketAddr> = netloc.to_socket_addrs()?.collect();
+    sort_v4_first(&mut addrs);
+    let elapsed = started.elapsed();
+    if elapsed > Duration::from_secs(1) {
+        pwarn!("DNS 解析 {netloc} 耗时 {:.1}s（{} 条）", elapsed.as_secs_f32(), addrs.len());
+    }
+    Ok(addrs)
+}
+
+/// v4 优先：无 IPv6 出口的机器上 v6 地址 connect 必失败。
+fn sort_v4_first(addrs: &mut [SocketAddr]) {
+    addrs.sort_by_key(|a| !a.is_ipv4());
+}
+
+#[cfg(test)]
+mod dns_cache_tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+
+    #[test]
+    fn v4_地址排前() {
+        let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 443);
+        let v4: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let mut addrs = vec![v6, v4, v6];
+        sort_v4_first(&mut addrs);
+        assert!(addrs[0].is_ipv4());
+        assert_eq!(addrs.iter().filter(|a| a.is_ipv4()).count(), 1);
+    }
+
+    #[test]
+    fn 新鲜缓存命中不发解析() {
+        let resolver = CachingResolver::default();
+        let v4: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        resolver.store("hit.example:443", vec![v4]);
+        let got = ureq::Resolver::resolve(&resolver, "hit.example:443").unwrap();
+        assert_eq!(got, vec![v4]);
+    }
+}
+
+impl CachingResolver {
+    /// 后台刷新线程用的写入入口（避开 thread_local 的复杂化：
+    /// 直接拿全局实例，Agent 是进程级单例）。
+    fn store(&self, netloc: &str, addrs: Vec<SocketAddr>) {
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(netloc.to_owned(), (Instant::now(), addrs));
+    }
+}
+
 /// 阻塞式 GET 文本（清单用）。
 fn fetch_text(uri: &str) -> Result<String, String> {
-    let resp = ureq::get(uri)
-        .timeout(FETCH_TIMEOUT)
+    let resp = agent()
+        .get(uri)
         .call()
         .map_err(|e| format!("清单获取失败：{e}"))?;
     let mut text = String::new();
@@ -290,8 +412,8 @@ fn fetch_text(uri: &str) -> Result<String, String> {
 
 /// 阻塞式 GET 二进制（分片用）。
 fn fetch_segment(uri: &str) -> Result<Vec<u8>, String> {
-    let resp = ureq::get(uri)
-        .timeout(FETCH_TIMEOUT)
+    let resp = agent()
+        .get(uri)
         .call()
         .map_err(|e| format!("分片获取失败：{uri}：{e}"))?;
     let mut v = Vec::new();
@@ -317,11 +439,12 @@ fn fetch_loop(url: &str, s: Arc<Session>) {
                 if pl.target_duration > 0 {
                     target = pl.target_duration;
                 }
-                // 直播追边：首发从倒数第 2 片起（留 1 片缓冲余量），
+                // 直播起点：首发从倒数 START_LAG 片起——起播后队列即有
+                // ~START_LAG×8s 缓冲，之后贴边供给 + 背压维持缓冲深度；
                 // 之后按绝对序号增量取新片（服务器可能裁掉旧片，夹取合法区间）。
                 let total = pl.media_sequence + pl.segments.len() as u64;
                 let start_idx = match emitted_total {
-                    None => (pl.segments.len() as u64).saturating_sub(2),
+                    None => (pl.segments.len() as u64).saturating_sub(START_LAG),
                     Some(prev) => prev.saturating_sub(pl.media_sequence).min(pl.segments.len() as u64),
                 };
                 let mut all_enqueued = true;
