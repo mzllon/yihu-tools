@@ -7,6 +7,8 @@
     ping     — 渐变底 + 声波涟漪（备选方案）
     sysdash  — 渐变底 + 白色仪表盘（tools/sysdash/icons）
     autodark — 渐变底 + 白色月牙/太阳（tools/autodark/icons）
+    radio    — 渐变底 + 白色电波发射（plugins/radio/icons；另出 32px 灰度
+               停止态 radio-32-stopped.png 供托盘）
 """
 
 import glob
@@ -108,11 +110,26 @@ def draw_daynight(img: Image.Image) -> None:
     img.alpha_composite(layer)
 
 
+def draw_radio(img: Image.Image) -> None:
+    """电台：中心发射源 + 左右对称双层电波（居中对称，区别于 ping 的
+    单侧呼出动感——广播是向四周均衡发射）。"""
+    d = ImageDraw.Draw(img)
+    cx, cy = S / 2, S / 2
+    d.ellipse([cx - 56, cy - 56, cx + 56, cy + 56], fill=(255, 255, 255, 255))
+    for r, w in [(150, 36), (240, 36)]:
+        # 右侧弧：-55°→55°；左侧弧：125°→235°（PIL 角度顺时针，0°=3点钟）
+        d.arc([cx - r, cy - r, cx + r, cy + r], start=-55, end=55,
+              fill=(255, 255, 255, 255), width=w)
+        d.arc([cx - r, cy - r, cx + r, cy + r], start=125, end=235,
+              fill=(255, 255, 255, 255), width=w)
+
+
 STYLES = {
     "yihu": (draw_yihu, "tools/yihu/icons"),
     "ping": (draw_ping, "tools/yihu/icons"),
     "sysdash": (draw_gauge, "tools/sysdash/icons"),
     "autodark": (draw_daynight, "tools/autodark/icons"),
+    "radio": (draw_radio, "plugins/radio/icons"),
 }
 
 
@@ -130,6 +147,14 @@ def main() -> None:
 
     for size in (32, 128, 256, 512):
         img.resize((size, size), Image.LANCZOS).save(icons_dir / f"{size}x{size}.png")
+
+    if style == "radio":
+        # 托盘停止态：去饱和灰度（播放态用彩色 32x32）
+        gray = img.convert("L").convert("RGBA")
+        # 白色图形保持纯白，底渐变变灰阶
+        gray.resize((32, 32), Image.LANCZOS).save(
+            icons_dir / "radio-32-stopped.png")
+        print("  另出托盘停止态 radio-32-stopped.png（灰度）")
 
     print(f"图标[{style}] 已生成到 {icons_dir}")
 

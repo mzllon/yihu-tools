@@ -138,7 +138,7 @@ impl RadioApp {
         let win = gtk::Window::new();
         win.set_application(Some(app));
         win.set_title(Some("电台"));
-        win.set_icon_name(Some("applications-multimedia-symbolic"));
+        win.set_icon_name(Some(crate::icons::ICON_NAME));
         win.set_default_size(420, 620);
         win.add_css_class("rp-root");
 

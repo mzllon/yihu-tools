@@ -9,6 +9,7 @@
 
 mod api;
 mod engine;
+mod icons;
 mod fdk;
 mod legacy;
 mod pulse;
@@ -33,6 +34,9 @@ fn main() {
     // 基座统一日志：文件落盘 + panic 钩子（GTK 回调 panic 即 abort，
     // 没有钩子闪退零现场——BUG-008）。要放最前，探测失败也要留痕。
     yihu_core::pluginlog::init("radio");
+    // 电台图标装入用户 hicolor（窗口/任务栏/通知按名取图）；纯装饰，
+    // 失败只记日志。须在取图标名的 UI 构建之前。
+    icons::install_hicolor();
     // 渲染栈瘦身（2026-10-19 实测）：Wayland 会话上若落到 X11 后端
     // （如 shell 环境残留 GDK_BACKEND=x11），gtk_init 的
     // gdk_display_prepare_gl 会无条件初始化 EGL，拉进 NVIDIA/Mesa 全家
@@ -69,7 +73,7 @@ fn main() {
                 yihu_core::perror!("播放环境探测失败：{e}");
                 eprintln!("radio-player: {e}");
                 let _ = std::process::Command::new("notify-send")
-                    .args(["--app-name=一呼电台", &e])
+                    .args(["--app-name=一呼电台", "--icon=tools.yihu.radio", &e])
                     .status();
                 std::process::exit(1);
             }

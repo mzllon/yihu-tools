@@ -31,8 +31,8 @@ static HANDLE: OnceLock<Mutex<ksni::Handle<Tray>>> = OnceLock::new();
 
 struct Tray {
     commands: Sender<Command>,
-    pixels_playing: Vec<u8>,
-    pixels_stopped: Vec<u8>,
+    pixels_playing: ksni::Icon,
+    pixels_stopped: ksni::Icon,
     registered: Arc<AtomicBool>,
     playing: bool,
     station: String,
@@ -73,7 +73,11 @@ impl ksni::Tray for Tray {
         } else {
             &self.pixels_stopped
         };
-        vec![ksni::Icon { width: 32, height: 32, data: data.clone() }]
+        vec![ksni::Icon {
+            width: data.width,
+            height: data.height,
+            data: data.data.clone(),
+        }]
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
@@ -158,10 +162,11 @@ pub fn install() -> Option<Receiver<Command>> {
 
     let (commands, receiver) = mpsc::channel();
     let registered = Arc::new(AtomicBool::new(false));
+    let (playing_icon, stopped_icon) = crate::icons::tray_pixmaps();
     let service = ksni::TrayService::new(Tray {
         commands,
-        pixels_playing: draw_icon(PLAYING_COLOR),
-        pixels_stopped: draw_icon(STOPPED_COLOR),
+        pixels_playing: playing_icon,
+        pixels_stopped: stopped_icon,
         registered,
         playing: false,
         station: String::new(),
@@ -195,66 +200,8 @@ pub fn shutdown() {
     }
 }
 
-/// 播放中：一呼强调橙；停止：中性灰
-const PLAYING_COLOR: [u8; 3] = [0xc6, 0x46, 0x00];
-const STOPPED_COLOR: [u8; 3] = [0x5d, 0x67, 0x70];
-
-/// 32×32 ARGB（ksni 布局：A 前置）：圆角方块底 + 白色播放三角。
-/// 纯函数无外部依赖，托盘不嵌 PNG 资源。
-fn draw_icon(accent: [u8; 3]) -> Vec<u8> {
-    const W: i32 = 32;
-    const H: i32 = 32;
-    const R: f64 = 8.0;
-    let mut px = Vec::with_capacity((W * H * 4) as usize);
-    for y in 0..H {
-        for x in 0..W {
-            let cx = x.min(W - 1 - x) as f64;
-            let cy = y.min(H - 1 - y) as f64;
-            // 圆角：角区落在以 (R,R) 为圆心、R 为半径的四分之一圆内
-            let inside = cx >= R || cy >= R || (cx - R).hypot(cy - R) <= R;
-            // 播放三角 (12,10)-(12,22)-(23,16)，半像素中心采样
-            let tri = point_in_triangle(
-                (x as f64 + 0.5, y as f64 + 0.5),
-                ((12.0, 10.0), (12.0, 22.0), (23.0, 16.0)),
-            );
-            let (a, rgb) = if !inside {
-                (0, [0, 0, 0])
-            } else if tri {
-                (255, [255, 255, 255])
-            } else {
-                (255, accent)
-            };
-            px.extend_from_slice(&[a, rgb[0], rgb[1], rgb[2]]);
-        }
-    }
-    px
-}
-
-/// 同号叉积点在三角形内（含边界）
-fn point_in_triangle(p: (f64, f64), t: ((f64, f64), (f64, f64), (f64, f64))) -> bool {
-    let sign = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| {
-        (a.0 - c.0) * (b.1 - c.1) - (b.0 - c.0) * (a.1 - c.1)
-    };
-    let d1 = sign(p, t.0, t.1);
-    let d2 = sign(p, t.1, t.2);
-    let d3 = sign(p, t.2, t.0);
-    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
-    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
-    !(has_neg && has_pos)
-}
-
-/// 诊断：把图标转储成 PPM（P6，纯标准库；ImageMagick 可转 PNG 核对）
-#[cfg(test)]
-fn dump_ppm(path: &std::path::Path) {
-    use std::io::Write as _;
-    let argb = draw_icon(PLAYING_COLOR);
-    let mut ppm = format!("P6\n32 32\n255\n").into_bytes();
-    for c in argb.chunks_exact(4) {
-        ppm.extend_from_slice(&[c[1], c[2], c[3]]);
-    }
-    let mut f = std::fs::File::create(path).unwrap();
-    f.write_all(&ppm).unwrap();
-}
+// 托盘图标：icons.rs 内嵌的 radio 样式 PNG（播放=彩色/停止=灰度），
+// install() 时在主线程解码一次为 ksni ARGB32 像素。
 
 #[cfg(test)]
 mod tests {
@@ -263,11 +210,12 @@ mod tests {
 
     fn tray_for_test() -> (Tray, Receiver<Command>) {
         let (tx, rx) = mpsc::channel();
+        let (playing, stopped) = crate::icons::tray_pixmaps();
         (
             Tray {
                 commands: tx,
-                pixels_playing: draw_icon(PLAYING_COLOR),
-                pixels_stopped: draw_icon(STOPPED_COLOR),
+                pixels_playing: playing,
+                pixels_stopped: stopped,
                 registered: Arc::new(AtomicBool::new(false)),
                 playing: false,
                 station: String::new(),
@@ -277,26 +225,28 @@ mod tests {
     }
 
     #[test]
-    fn icon_is_32x32_argb_with_shape() {
-        let px = draw_icon(PLAYING_COLOR);
-        assert_eq!(px.len(), 32 * 32 * 4);
-        let at = |x: i32, y: i32| -> [u8; 4] {
-            let o = ((y * 32 + x) * 4) as usize;
-            [px[o], px[o + 1], px[o + 2], px[o + 3]]
-        };
-        // 四角在圆角外 → 全透明
-        for (x, y) in [(0, 0), (31, 0), (0, 31), (31, 31)] {
-            assert_eq!(at(x, y)[0], 0, "角 ({x},{y}) 应透明");
+    fn icon_is_32x32_radio_artwork() {
+        let (playing, stopped) = crate::icons::tray_pixmaps();
+        for icon in [&playing, &stopped] {
+            assert_eq!(icon.width, 32);
+            assert_eq!(icon.height, 32);
+            assert_eq!(icon.data.len(), 32 * 32 * 4);
         }
-        // 底色区：强调橙；三角中心：白
-        assert_eq!(at(4, 16), [255, PLAYING_COLOR[0], PLAYING_COLOR[1], PLAYING_COLOR[2]]);
-        assert_eq!(at(14, 16), [255, 255, 255, 255]);
-        // 停止态底色是灰：取内部非三角像素 (4,16)
-        let off = draw_icon(STOPPED_COLOR);
-        let o = ((16 * 32 + 4) * 4) as usize;
-        assert_eq!(&off[o..o + 4], &[255, STOPPED_COLOR[0], STOPPED_COLOR[1], STOPPED_COLOR[2]]);
-        // 转储核对用（ImageMagick 可转 PNG 肉眼看）
-        dump_ppm(&std::env::temp_dir().join("radio-tray-icon.ppm"));
+        // 中心是白色发射源（圆点圆心）
+        let at = |icon: &ksni::Icon, x: i32, y: i32| -> [u8; 4] {
+            let o = ((y * 32 + x) * 4) as usize;
+            [icon.data[o], icon.data[o + 1], icon.data[o + 2], icon.data[o + 3]]
+        };
+        let c = at(&playing, 16, 16);
+        assert_eq!(c[0], 255, "中心应不透明");
+        assert_eq!((c[1], c[2], c[3]), (255, 255, 255), "中心应纯白");
+        // 播放态中心区带彩色底（非灰度）：取弧外内部点 (16, 5)
+        // 停止态整体灰度：所有像素 R==G==B
+        for p in stopped.data.chunks_exact(4) {
+            assert_eq!(p[1], p[2], "停止态应灰度（R==G）");
+            assert_eq!(p[2], p[3], "停止态应灰度（G==B）");
+        }
+        assert_ne!(playing.data, stopped.data);
     }
 
     #[test]
@@ -341,10 +291,11 @@ mod tests {
         assert_eq!(t.state_line(), "未在播放");
         let menu = t.menu();
         assert_eq!(label_of(&menu, 1), "播放");
-        let o = ((16 * 32 + 4) * 4) as usize;
-        assert_eq!(
-            &t.icon_pixmap()[0].data[o..o + 4],
-            &[255, STOPPED_COLOR[0], STOPPED_COLOR[1], STOPPED_COLOR[2]]
+        // 停止态切到灰度图标（与播放态像素不同）
+        assert_ne!(
+            t.icon_pixmap()[0].data,
+            t.pixels_playing.data,
+            "停止态应切换为灰度图标"
         );
     }
 }

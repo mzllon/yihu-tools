@@ -1,6 +1,6 @@
 id = "radio"
 name = "电台"
-version = "3.0.0-native"
+version = "3.1.0-native"
 api = "^1"
 kind = "native"
 entry = "radio-player"
