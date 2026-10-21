@@ -318,7 +318,7 @@ const DNS_TTL: Duration = Duration::from_secs(600);
 
 impl ureq::Resolver for CachingResolver {
     fn resolve(&self, netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
-        let mut cache = self.cache.lock().unwrap();
+        let cache = self.cache.lock().unwrap();
         if let Some((at, addrs)) = cache.get(netloc) {
             if at.elapsed() < DNS_TTL {
                 return Ok(addrs.clone());
@@ -330,27 +330,57 @@ impl ureq::Resolver for CachingResolver {
             std::thread::Builder::new()
                 .name("radio-dns".into())
                 .spawn(move || {
-                    if let Ok(fresh) = resolve_blocking(&netloc) {
+                    if let Ok(fresh) = fresh_resolve(&netloc) {
                         resolver.store(&netloc, fresh);
                     }
                 })
                 .ok();
             return Ok(addrs);
         }
-        // 首次：阻塞解析（有界性由 OS 的 DNS 重试机制决定，无旧值可救）
-        let addrs = resolve_blocking(netloc)?;
-        cache.insert(netloc.to_owned(), (Instant::now(), addrs.clone()));
+        // 内存未命中：先试盘上缓存（跨重启，BUG-010 第二轮——冷缓存 +
+        // 挂起式 getaddrinfo 让每次重启后首播必失败）
+        drop(cache);
+        if let Some(addrs) = load_dns_cache(netloc) {
+            self.store(netloc, addrs.clone());
+            return Ok(addrs);
+        }
+        // 真首次：DoH（有界）优先，getaddrinfo 兜底
+        let addrs = fresh_resolve(netloc)?;
+        self.store(netloc, addrs.clone());
         Ok(addrs)
     }
 }
 
-fn resolve_blocking(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+/// 权威解析（内存/盘都没有时）：DoH 优先（TCP 有界，绕开 5 级 CNAME
+/// 长链在 UDP 公共 DNS 上的间歇挂起），失败回退 getaddrinfo。
+fn fresh_resolve(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+    // DoH 端点自身绝不能再走 DoH——否则解析 dns.alidns.com 的请求又要
+    // 先解析 dns.alidns.com，无限递归栈溢出（2026-10-21 实测崩溃）。
+    if netloc.starts_with(DOH_HOST) {
+        return resolve_getaddrinfo(netloc);
+    }
+    let started = Instant::now();
+    let result = doh_resolve(netloc).or_else(|e| {
+        pwarn!("DoH 解析 {netloc} 失败（{e}），回退 getaddrinfo");
+        resolve_getaddrinfo(netloc)
+    });
+    if let Ok(addrs) = &result {
+        let elapsed = started.elapsed();
+        if elapsed > Duration::from_secs(1) {
+            pwarn!("解析 {netloc} 耗时 {:.1}s", elapsed.as_secs_f32());
+        }
+        store_dns_cache(netloc, addrs);
+    }
+    result
+}
+
+fn resolve_getaddrinfo(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
     let started = Instant::now();
     let mut addrs: Vec<SocketAddr> = netloc.to_socket_addrs()?.collect();
     sort_v4_first(&mut addrs);
     let elapsed = started.elapsed();
     if elapsed > Duration::from_secs(1) {
-        pwarn!("DNS 解析 {netloc} 耗时 {:.1}s（{} 条）", elapsed.as_secs_f32(), addrs.len());
+        pwarn!("getaddrinfo {netloc} 耗时 {:.1}s（{} 条）", elapsed.as_secs_f32(), addrs.len());
     }
     Ok(addrs)
 }
@@ -358,6 +388,112 @@ fn resolve_blocking(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
 /// v4 优先：无 IPv6 出口的机器上 v6 地址 connect 必失败。
 fn sort_v4_first(addrs: &mut [SocketAddr]) {
     addrs.sort_by_key(|a| !a.is_ipv4());
+}
+
+fn io_error(msg: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, msg)
+}
+
+// ---- DoH（DNS over HTTPS，阿里公共 DNS；BUG-010 第二轮）----
+
+/// DoH 端点：阿里公共 DNS 的 JSON 接口。查询走 TCP（有界、抗 UDP 丢包），
+/// 一步拿到最终 A 记录，绕开长 CNAME 链的逐级解析。
+const DOH_ENDPOINT: &str = "https://dns.alidns.com/resolve";
+/// DoH 端点域名（含端口前缀形态）；解析走 getaddrinfo，防递归。
+const DOH_HOST: &str = "dns.alidns.com:";
+
+/// DoH 查询并提取 A 记录；`netloc` 形如 "host:443"。
+fn doh_resolve(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+    let (host, port) = netloc
+        .rsplit_once(':')
+        .ok_or_else(|| io_error(format!("netloc 缺端口：{netloc}")))?;
+    let port: u16 = port.parse().map_err(|_| io_error(format!("端口异常：{netloc}")))?;
+    let url = format!("{DOH_ENDPOINT}?name={host}&type=A");
+    let resp = agent()
+        .get(&url)
+        .call()
+        .map_err(|e| io_error(format!("DoH 请求失败：{e}")))?;
+    let mut body = String::new();
+    resp.into_reader()
+        .take(MAX_BODY)
+        .read_to_string(&mut body)
+        .map_err(|e| io_error(format!("DoH 响应读取失败：{e}")))?;
+    parse_doh_answer(&body, port)
+}
+
+/// 从 DoH JSON（{"Answer":[{"type":1,"data":"1.2.3.4"},…]}）提取 IPv4
+/// A 记录；无 A 记录报错（调用方回退 getaddrinfo）。
+fn parse_doh_answer(body: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| io_error(format!("DoH 响应非 JSON：{e}")))?;
+    let mut addrs = Vec::new();
+    for ans in v.get("Answer").and_then(|a| a.as_array()).into_iter().flatten() {
+        if ans.get("type").and_then(|t| t.as_i64()) != Some(1) {
+            continue; // 只要 A 记录（本机无 v6 出口，AAAA 无意义）
+        }
+        if let Some(data) = ans.get("data").and_then(|d| d.as_str()) {
+            if let Ok(ip) = data.parse::<std::net::Ipv4Addr>() {
+                addrs.push(SocketAddr::new(ip.into(), port));
+            }
+        }
+    }
+    if addrs.is_empty() {
+        return Err(io_error("DoH 响应无 A 记录".to_owned()));
+    }
+    Ok(addrs)
+}
+
+// ---- DNS 盘缓存（跨进程重启；BUG-010 第二轮）----
+
+fn dns_cache_path() -> std::path::PathBuf {
+    crate::store::data_dir().join("dns-cache.json")
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DnsCacheEntry {
+    t: u64,
+    addrs: Vec<String>,
+}
+
+fn load_dns_cache_from(path: &std::path::Path, netloc: &str) -> Option<Vec<SocketAddr>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let map: HashMap<String, DnsCacheEntry> = serde_json::from_str(&text).ok()?;
+    let entry = map.get(netloc)?;
+    let addrs: Vec<SocketAddr> = entry.addrs.iter().filter_map(|a| a.parse().ok()).collect();
+    (addrs.len() > 0).then_some(addrs)
+}
+
+fn load_dns_cache(netloc: &str) -> Option<Vec<SocketAddr>> {
+    load_dns_cache_from(&dns_cache_path(), netloc)
+}
+
+fn store_dns_cache_to(path: &std::path::Path, netloc: &str, addrs: &[SocketAddr]) {
+    let mut map: HashMap<String, DnsCacheEntry> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    map.insert(
+        netloc.to_owned(),
+        DnsCacheEntry {
+            t: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            addrs: addrs.iter().map(|a| a.to_string()).collect(),
+        },
+    );
+    let Ok(text) = serde_json::to_string(&map) else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+fn store_dns_cache(netloc: &str, addrs: &[SocketAddr]) {
+    store_dns_cache_to(&dns_cache_path(), netloc, addrs);
 }
 
 #[cfg(test)]
@@ -373,6 +509,34 @@ mod dns_cache_tests {
         sort_v4_first(&mut addrs);
         assert!(addrs[0].is_ipv4());
         assert_eq!(addrs.iter().filter(|a| a.is_ipv4()).count(), 1);
+    }
+
+    #[test]
+    fn doh_answer_只取a记录() {
+        let body = r#"{"Status":0,"Answer":[
+            {"name":"ls-hw-ot.qtfm.cn","type":5,"data":"ls-hw-ot.qtfm.cn.volcgslb.com"},
+            {"name":"x","type":28,"data":"2409:8087::fb"},
+            {"name":"x","type":1,"data":"39.136.113.245"},
+            {"name":"x","type":1,"data":"39.136.113.248"}]}"#;
+        let addrs = parse_doh_answer(body, 443).unwrap();
+        assert_eq!(addrs.len(), 2);
+        assert!(addrs.iter().all(|a| a.is_ipv4() && a.port() == 443));
+        assert!(parse_doh_answer(r#"{"Answer":[]}"#, 443).is_err());
+        assert!(parse_doh_answer("not json", 443).is_err());
+    }
+
+    #[test]
+    fn dns_盘缓存往返() {
+        let path = std::env::temp_dir().join(format!("yihu-dns-test-{}.json", std::process::id()));
+        let v4: SocketAddr = "39.136.113.245:443".parse().unwrap();
+        store_dns_cache_to(&path, "cdn.example:443", &[v4]);
+        // 覆盖写入不丢其他域名
+        let v4b: SocketAddr = "1.2.3.4:443".parse().unwrap();
+        store_dns_cache_to(&path, "api.example:443", &[v4b]);
+        assert_eq!(load_dns_cache_from(&path, "cdn.example:443"), Some(vec![v4]));
+        assert_eq!(load_dns_cache_from(&path, "api.example:443"), Some(vec![v4b]));
+        assert_eq!(load_dns_cache_from(&path, "missing:443"), None);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
