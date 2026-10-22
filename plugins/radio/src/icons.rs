@@ -18,9 +18,14 @@ pub const RADIO_512: &[u8] = include_bytes!("../icons/512x512.png");
 /// 图标主题名：与 application_id 一致（hicolor 安装路径同名）。
 pub const ICON_NAME: &str = "tools.yihu.radio";
 
-/// 把 PNG 安装进用户 hicolor 图标主题（幂等：内容一致就跳过）。
+/// GNOME Wayland 的 Shell 按 application id 找同名 .desktop 文件取
+/// 产品名与图标（BUG-010 图标轮：没有它，任务栏/alt-tab 显示原始
+/// app-id 与默认齿轮图标）。文件 id 必须与 application_id 完全一致。
+const DESKTOP_ID: &str = "tools.yihu.radio.desktop";
+
+/// 安装图标主题 + desktop 文件（幂等：内容一致就跳过）。
 /// 纯装饰，失败只记日志——托盘像素是内嵌的，不受影响。
-pub fn install_hicolor() {
+pub fn install_assets() {
     for (size, png) in [
         (32, RADIO_32),
         (128, RADIO_128),
@@ -39,6 +44,40 @@ pub fn install_hicolor() {
         if let Err(e) = std::fs::write(&path, png) {
             pwarn!("图标写入失败 {}：{e}", path.display());
         }
+    }
+    install_desktop();
+}
+
+/// 安装 desktop 文件到用户 applications 目录（应用网格可见「一呼电台」，
+/// 运行窗口据此显示产品名与图标）。
+fn install_desktop() {
+    let Ok(exe) = std::env::current_exe() else {
+        pwarn!("无法定位自身路径，desktop 文件跳过");
+        return;
+    };
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_default();
+    let dir = data_home.join("applications");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(DESKTOP_ID);
+    let content = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=一呼电台\n\
+         Name[en]=Yihu Radio\n\
+         Exec=\"{}\"\n\
+         Icon={ICON_NAME}\n\
+         Terminal=false\n\
+         Categories=Audio;AudioVideo;Utility;\n\
+         StartupNotify=true\n"
+    , exe.display());
+    if std::fs::read_to_string(&path).is_ok_and(|b| b == content) {
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, &content) {
+        pwarn!("desktop 写入失败 {}：{e}", path.display());
     }
 }
 
