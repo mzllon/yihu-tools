@@ -732,6 +732,35 @@ mod tests {
     }
 
     #[test]
+    fn mdworkbench_panel_shell_query() {
+        // W7 收编 mini 壳：词头命中出行。回归位：manifest 权限声明非法
+        // （fs.read 缺 @glob、process.spawn 不在词表）曾致整插件注册表
+        // 拒载，md / markdown 搜索全空。
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../plugins/mdworkbench/wasm/target/wasm32-unknown-unknown/release/mdworkbench_panel_wasm.wasm",
+        );
+        if !p.exists() {
+            eprintln!("跳过：mdworkbench panel.wasm 未构建");
+            return;
+        }
+        let declared = vec![
+            "fs.read@~/**".to_string(),
+            "fs.write@~/**".to_string(),
+            "notify".to_string(),
+        ];
+        let mut reg = WasmRegistry::default();
+        assert!(reg.ensure_loaded("mdworkbench", &p, &declared).unwrap());
+        for q in ["md", "markdown", "笔记", "md 笔记本"] {
+            let rows = reg.query("mdworkbench", q).unwrap();
+            assert_eq!(rows.len(), 1, "查询 {q:?} 应命中入口行，实际 {rows:?}");
+            assert!(rows[0].title.contains("Markdown 工作台"));
+            assert_eq!(rows[0].payload, "open");
+        }
+        // 非本插件词头静默
+        assert!(reg.query("mdworkbench", "hello").unwrap().is_empty());
+    }
+
+    #[test]
     fn non_wasm_entry_rejected() {
         let mut reg = WasmRegistry::default();
         assert!(!reg.ensure_loaded("x", Path::new("/tmp/nothing.py"), &[]).unwrap());

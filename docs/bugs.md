@@ -283,3 +283,32 @@
      无限递归栈溢出崩溃（SIGSEGV 不经 panic 钩子，日志零痕迹，
      靠「主实例启动后秒崩」的现场定位）——自引用服务必须显式
      短路，修复即 `netloc` 前缀特判走 getaddrinfo。
+
+## BUG-011 mdworkbench 收编后面板搜 md/markdown 全空（manifest 权限声明非法 → 整插件注册表拒载）
+- **现象**：2026-10-22 用户反馈面板输入 `md`、`markdown` 均无「Markdown 工作台」
+  入口行。插件目录、panel.wasm、daemon 都是新的，搜索却像插件不存在。
+- **根因**：收编时手写 manifest `permissions = ["fs.read", "fs.write",
+  "process.spawn"]`，两条都过不了 M5 v2 能力词表校验：fs.read/fs.write 是
+  参数化能力、必须带 `@glob`（如 `fs.read@~/**`）；`process.spawn` 压根不在
+  词表（宿主代执行模型不提供 spawn 能力）。`list_installed_in` 逐插件
+  validate 是 fail-closed——一条非法 = 整个插件不进注册表，native 也一样。
+  于是无会话、panel_entry 不装载、搜索必然全空。线索其实一直在：
+  `YIHU_PANEL_DEBUG=1` 下每次呼出都打「插件注册表问题：…权限声明非法」，
+  非调试模式下该信号无处可见（status 走 /proc，不含注册表错误）。
+- **修复**：
+  1. manifest 权限改为词表内合法声明 `["fs.read@~/**", "fs.write@~/**",
+     "notify"]`（native 直连插件的声明是审计面非强制面；pandoc 导出与
+     notify-send 调用是 native 进程自持权能，词表不覆盖、不硬凑声明，
+     manifest 注释说明）。
+  2. 补真实产物集成测试 `wasm_plugin::tests::mdworkbench_panel_shell_query`
+     （装载 + md/markdown/笔记/「md 笔记本」命中入口行 + 无关词静默），
+     先例 cronkit/radio。
+  3. 实机复验：`YIHU_PANEL_DEBUG=1` 下「注册表 17 个插件，错误 0 条」+
+     「native 插件 mdworkbench 面板入口已加载」。
+- **教训**：
+  1. 插件收编/安装后必须跑一次 `YIHU_PANEL_DEBUG=1` 呼出，看「注册表 N 个
+     插件，错误 M 条」——拒载信号只在这里，非调试模式完全静默。
+  2. 能力词表校验不分 native/wasm：permissions 有一条不合法 = 整个插件
+     不存在，manifest 是装机闸门不是文档。
+  3. 「搜不到」类报障先看注册表装载日志再怀疑匹配逻辑；本次匹配逻辑
+     （wasm 词头 contains）自始至终是对的。

@@ -7,8 +7,12 @@ entry = "mdworkbench"
 panel_entry = "panel.wasm"
 
 # 本地文件工具：打开/编辑/导出任意用户文件夹下的 *.md（native 进程，
-# 权限为审计声明，非沙箱强制）。
-permissions = ["fs.read", "fs.write", "process.spawn"]
+# 权限为审计声明，非沙箱强制）。fs 读写范围按能力词表声明为 HOME 下
+# 全域 glob（文件经 GTK 文件对话框自选，声明即审计面）；pandoc 导出与
+# notify-send 提示为 native 进程自持权能，能力词表（宿主代执行模型）
+# 不覆盖，故不声明。
+# 注意 permissions 必须位于任何 [[triggers]] 段之前（TOML 段归属约定）。
+permissions = ["fs.read@~/**", "fs.write@~/**", "notify"]
 
 [[triggers]]
 keywords = ["md", "markdown", "工作台", "笔记", "mdworkbench"]
