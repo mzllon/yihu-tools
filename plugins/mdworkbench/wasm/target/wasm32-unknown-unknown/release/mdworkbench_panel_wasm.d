@@ -1,0 +1,1 @@
+/home/ming-tang/Documents/Self/yihu-tools/plugins/mdworkbench/wasm/target/wasm32-unknown-unknown/release/mdworkbench_panel_wasm.wasm: /home/ming-tang/Documents/Self/yihu-tools/crates/yihu-wasm-runtime/src/cap.rs /home/ming-tang/Documents/Self/yihu-tools/crates/yihu-wasm-runtime/src/lib.rs /home/ming-tang/Documents/Self/yihu-tools/plugins/mdworkbench/wasm/src/lib.rs

@@ -4,6 +4,7 @@
 //! `toggle/show/hide/quit/status` = 薄 CLI（连会话总线调用后即退）。
 //! 性能底线：窗口与演示数据启动时建好、隐藏待命，呼出路径零 IO。
 
+mod assets;
 mod app;
 mod caps;
 mod calc;
@@ -23,6 +24,9 @@ mod theme;
 mod service;
 
 fn main() {
+    // 面板图标 + desktop 文件自装（GNOME 按 application id 找同名
+    // desktop 取产品名与图标；无它则 alt-tab 露原始 id + 默认齿轮）
+    assets::install_assets();
     // 全家统一约定：软件渲染压内存（见 README 实测教训）
     std::env::set_var("GSK_RENDERER", "cairo");
     if std::env::var_os("YIHU_PANEL_BENCH").is_some() {

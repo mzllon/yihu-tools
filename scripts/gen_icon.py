@@ -9,6 +9,7 @@
     autodark — 渐变底 + 白色月牙/太阳（tools/autodark/icons）
     radio    — 渐变底 + 白色电波发射（plugins/radio/icons；另出 32px 灰度
                停止态 radio-32-stopped.png 供托盘）
+    panel    — 渐变底 + 白色田字格圆角卡（tools/yihu-panel/icons）
 """
 
 import glob
@@ -124,12 +125,29 @@ def draw_radio(img: Image.Image) -> None:
               fill=(255, 255, 255, 255), width=w)
 
 
+def draw_panelgrid(img: Image.Image) -> None:
+    """面板：2×2 圆角卡片网格——一呼面板是工具卡片的集合之家。"""
+    d = ImageDraw.Draw(img)
+    card, gap = 128, 42
+    total = card * 2 + gap
+    x0 = y0 = (S - total) / 2
+    for row in range(2):
+        for col in range(2):
+            x = x0 + col * (card + gap)
+            y = y0 + row * (card + gap)
+            d.rounded_rectangle(
+                [x, y, x + card, y + card], radius=36,
+                fill=(255, 255, 255, 255),
+            )
+
+
 STYLES = {
     "yihu": (draw_yihu, "tools/yihu/icons"),
     "ping": (draw_ping, "tools/yihu/icons"),
     "sysdash": (draw_gauge, "tools/sysdash/icons"),
     "autodark": (draw_daynight, "tools/autodark/icons"),
     "radio": (draw_radio, "plugins/radio/icons"),
+    "panel": (draw_panelgrid, "tools/yihu-panel/icons"),
 }
 
 
