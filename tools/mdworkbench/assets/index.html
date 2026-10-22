@@ -39,7 +39,7 @@ const editor = new toastui.Editor({
   el: document.getElementById('editor'),
   height: '100%',
   initialEditType: 'wysiwyg',
-  previewStyle: 'vertical',
+  previewStyle: 'tab',
   usageStatistics: false,
   hideModeSwitch: false,
   plugins: [toastui.Editor.plugin.codeSyntaxHighlight],
@@ -86,6 +86,13 @@ const editor = new toastui.Editor({
 window.yihuGetMd = () => editor.getMarkdown();
 window.yihuSetMd = (md) => { editor.setMarkdown(md, false); postOutline(); refreshMermaid(); };
 window.yihuSetMode = (m) => { editor.changeMode(m); };
+// Typora 同款：Ctrl+/ 在 所见即所得 ⇄ 源码 间切换（源码模式无分栏预览）
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === '/' || e.code === 'Slash')) {
+    e.preventDefault();
+    editor.changeMode(editor.currentMode() === 'wysiwyg' ? 'markdown' : 'wysiwyg');
+  }
+});
 window.yihuSetDir = (d) => { currentDir = d; editor.setMarkdown(editor.getMarkdown(), false); };
 window.yihuTheme = (m) => {
   const root = document.querySelector('.toastui-editor-defaultUI');

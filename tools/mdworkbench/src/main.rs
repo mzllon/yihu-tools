@@ -34,7 +34,7 @@ const MERMAID_JS: &[u8] = include_bytes!("../assets/mermaid.min.js");
 const STICKY_HTML: &str = include_str!("../assets/sticky.html");
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 
-const WELCOME: &str = "# 欢迎使用 Markdown 工作台\n\n直接开始输入 —— 这是**所见即所得**编辑器。\n\n- 工具栏可切换 Markdown / 所见即所得模式\n- 表格、任务列表、删除线都支持\n- 顶部按钮：打开文件夹、保存、导出\n";
+const WELCOME: &str = "# 欢迎使用 Markdown 工作台\n\n直接开始输入 —— 这是**所见即所得**编辑器。\n\n- 默认所见即所得，Ctrl+/ 或右下角「Markdown」标签可切到源码模式\n- 表格、任务列表、删除线都支持\n- 顶部按钮：打开文件夹、保存、导出\n";
 
 struct State {
     window: ApplicationWindow,
