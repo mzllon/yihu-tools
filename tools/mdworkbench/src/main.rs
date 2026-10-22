@@ -96,7 +96,8 @@ fn dispatch(app: &Application, args: &[String]) {
                 build_view_ui(app, Some(p.clone()));
             }
         }
-        _ => build_ui(app, args.first().cloned()),
+        // 面板激活动作传 --open（native 约定，同 radio）：当无参开主窗
+        _ => build_ui(app, args.first().filter(|a: &&String| a.as_str() != "--open").cloned()),
     }
 }
 

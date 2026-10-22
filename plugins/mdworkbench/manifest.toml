@@ -1,0 +1,13 @@
+id = "mdworkbench"
+name = "Markdown 工作台"
+version = "1.0.0"
+api = "^1"
+kind = "native"
+entry = "mdworkbench"
+
+# 本地文件工具：打开/编辑/导出任意用户文件夹下的 *.md（native 进程，
+# 权限为审计声明，非沙箱强制）。
+permissions = ["fs.read", "fs.write", "process.spawn"]
+
+[[triggers]]
+keywords = ["md", "markdown", "工作台", "笔记", "mdworkbench"]
