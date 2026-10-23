@@ -14,11 +14,15 @@ body.darkbg #src{background:#1e1e1e;color:#d4d4d4}
 #src[hidden]{display:none}
 </style>
 </head><body>
+<!-- vditor ant 图标雪碧图（原 dist/js/icons/ant.js 静态内联：其懒加载
+     时序不稳曾致工具栏空图标） -->
 <div id="editor"></div>
 <textarea id="src" hidden spellcheck="false" aria-label="源码模式"></textarea>
 <script src="vditor/index.min.js"></script>
 <script>
 function post(o){ try{ window.webkit.messageHandlers.yihu.postMessage(JSON.stringify(o)); }catch(e){} }
+function jlog(s){ post({type:'jslog', text:s}); try{ console.log(s); }catch(e){} }
+window.onerror = (m, s2, l) => { jlog('JS错误: ' + m + ' @' + l); };
 
 let currentDir = '';           // 当前 md 文件目录（<base> 解析相对图片/链接）
 let mode = 'ir';               // 'ir' = 所见即所得（Vditor IR） | 'source' = 纯源码
@@ -49,13 +53,15 @@ function postOutline(){
 }
 function getMd(){ return mode === 'source' ? src.value : editor.getValue(); }
 
+jlog('页面脚本启动');
 const editor = new Vditor('editor', {
   height: '100%',
   mode: 'ir',                   // Typora 同款：即时渲染，光标行显原文、离行融为版式
   theme: 'classic',
   lang: 'zh_CN',
   cdn: ASSET_DIR,
-  toolbar: [],                  // 纸感：无常驻工具栏
+  // Typora 式插入入口：工具栏（按钮自带光标定位）+ 快捷键（见下方 keydown）
+  toolbar: ["headings", "table", "code", "quote", "check", "line"],
   typewriterMode: false,
   cache: { enable: false },     // 草稿缓存关闭——文件管理在 Rust 侧
   counter: { enable: false },
@@ -64,6 +70,7 @@ const editor = new Vditor('editor', {
   value: '',
   after: () => {
     ready = true;
+    jlog('编辑器就绪');
     if (pendingMd !== null) { editor.setValue(pendingMd, false); pendingMd = null; }
     post({type:'ready'});
   },
@@ -97,12 +104,42 @@ function setMode(m){
   post({type:'changed'});
   postOutline();
 }
-// Typora 同款：Ctrl+/ 在 所见即所得 ⇄ 源码 间切换
+// Typora 同款：Ctrl+/ 在 所见即所得 ⇄ 源码 间切换；Ctrl+T 表格等插入快捷键
+const INSERTS = {
+  'table': '| 名称 | 数量 | 备注 |\n| --- | --- | --- |\n|  |  |  |\n',
+  'code-block': '```rust\n\n```\n',
+  'quote': '> ',
+  'task-list': '- [ ] ',
+  'line': '\n---\n',
+};
+window.yihuInsert = (k) => {
+  const s = INSERTS[k];
+  if (!s) return;
+  if (mode === 'source') {
+    const pos = src.selectionEnd || 0;
+    src.value = src.value.slice(0, pos) + s + src.value.slice(src.selectionStart || pos);
+    src.selectionStart = src.selectionEnd = pos + s.length;
+    src.focus();
+    scheduleChange();
+  } else {
+    editor.insertValue(s);
+    scheduleChange();
+  }
+};
 document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && (e.key === '/' || e.code === 'Slash')) {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && (e.key === '/' || e.code === 'Slash')) {
     e.preventDefault();
     setMode(mode === 'ir' ? 'source' : 'ir');
+    return;
   }
+  if (!mod) return;
+  const k = e.key.toLowerCase();
+  const act = (!e.shiftKey && k === 't' && 'table')
+           || (e.shiftKey && k === 'k' && 'code-block')
+           || (e.shiftKey && k === 'q' && 'quote')
+           || (e.shiftKey && k === 'x' && 'task-list');
+  if (act) { e.preventDefault(); window.yihuInsert(act); }
 });
 src.addEventListener('input', () => scheduleChange());
 
@@ -193,6 +230,12 @@ window.yihuScrollHeading = (idx) => {
     if (hs[idx]) hs[idx].scrollIntoView({block:'start'});
   } catch(err){}
 };
+if (window.YIHU_MD_DEBUG !== false) {
+  setTimeout(() => {
+    const tb = document.querySelector('.vditor-toolbar');
+    console.log('tb-items', tb ? tb.children.length : -1, 'tb-html-len', tb ? tb.innerHTML.length : -1, 'icons', typeof window.vditorIconSVG !== 'undefined' ? 'loaded' : 'missing');
+  }, 2000);
+}
 window.yihuImageSaved = (id, path) => {
   const name = pendingImage[id];
   delete pendingImage[id];

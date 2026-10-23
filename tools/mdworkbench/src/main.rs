@@ -38,6 +38,7 @@ const HLJS_GITHUB_DARK_CSS: &[u8] =
     include_bytes!("../assets/dist/js/highlight.js/styles/github-dark.min.css");
 const MERMAID_JS: &[u8] = include_bytes!("../assets/dist/js/mermaid/mermaid.min.js");
 const I18N_ZH_CN: &[u8] = include_bytes!("../assets/dist/js/i18n/zh_CN.js");
+const ICONS_ANT_JS: &[u8] = include_bytes!("../assets/dist/js/icons/ant.js");
 const CONTENT_LIGHT_CSS: &[u8] = include_bytes!("../assets/dist/css/content-theme/light.css");
 const CONTENT_DARK_CSS: &[u8] = include_bytes!("../assets/dist/css/content-theme/dark.css");
 // toastui 三件仅剩便签窗 sticky.html 在用
@@ -47,7 +48,7 @@ const DARK_CSS: &[u8] = include_bytes!("../assets/toastui-editor-dark.css");
 const STICKY_HTML: &str = include_str!("../assets/sticky.html");
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 
-const WELCOME: &str = "# 欢迎使用 Markdown 工作台\n\n直接开始输入 —— 这是**所见即所得**编辑器。\n\n- 默认即时渲染（Typora 手感），Ctrl+/ 切到纯源码模式\n- 表格、任务列表、删除线都支持\n- 顶部按钮：打开文件夹、保存、导出\n";
+const WELCOME: &str = "# 欢迎使用 Markdown 工作台\n\n直接开始输入 —— 即时渲染（Typora 手感）。\n\n- Ctrl+/ 切源码；**Ctrl+T** 插表格；Ctrl+Shift+K 代码块\n- Ctrl+Shift+Q 引用；Ctrl+Shift+X 任务列表\n- 表格手打也行：表头回车后补一行 `| --- | --- |` 即成形\n- 顶部按钮：打开文件夹、保存、导出\n";
 
 struct State {
     window: ApplicationWindow,
@@ -295,6 +296,12 @@ fn build_view_ui(app: &Application, html: Option<String>) {
         .default_height(760)
         .build();
     let view = WebView::new();
+    // JS console 直落 stdout（YIHU_MD_DEBUG=1 时启用）：编辑器页初始化故障的现场
+    if std::env::var_os("YIHU_MD_DEBUG").is_some() {
+        if let Some(s) = webkit6::prelude::WebViewExt::settings(&view) {
+            s.set_enable_write_console_messages_to_stdout(true);
+        }
+    }
     view.set_vexpand(true);
     view.set_hexpand(true);
     win.set_child(Some(&view));
@@ -323,6 +330,7 @@ fn install_assets() -> Result<PathBuf, String> {
         ),
         ("dist/js/mermaid/mermaid.min.js", MERMAID_JS),
         ("dist/js/i18n/zh_CN.js", I18N_ZH_CN),
+        ("dist/js/icons/ant.js", ICONS_ANT_JS),
         ("dist/css/content-theme/light.css", CONTENT_LIGHT_CSS),
         ("dist/css/content-theme/dark.css", CONTENT_DARK_CSS),
         // toastui 三件：便签窗 sticky.html 专用
@@ -472,6 +480,15 @@ fn build_ui(app: &Application, initial: Option<String>) {
                     st.ready.set(true);
                     if let Some(md) = st.pending_md.borrow_mut().take() {
                         set_md(&st, &md);
+                    }
+                }
+                Some("jslog") => {
+                    // 编辑器页诊断（YIHU_MD_DEBUG=1 时可见，排查通道）
+                    if std::env::var_os("YIHU_MD_DEBUG").is_some() {
+                        eprintln!(
+                            "md-js: {}",
+                            v.get("text").and_then(|x| x.as_str()).unwrap_or("")
+                        );
                     }
                 }
                 Some("outline") => {
