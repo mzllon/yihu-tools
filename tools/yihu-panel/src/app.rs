@@ -698,6 +698,14 @@ fn build_panel_ui(deps: &Rc<Deps>, slot: &Slot) -> PanelUi {
             } else {
                 grid_view.set_visible(false);
                 scroll.set_visible(true);
+                // 宿主词头置顶（BUG-012）：触发词精确命中的插件行是最高
+                // 信号，插在模糊匹配之前——精确信号不再被子序列噪声压底
+                for e in plugins.borrow().pinned_rows() {
+                    if rows.len() >= MAX_SHOWN {
+                        break;
+                    }
+                    rows.push(e);
+                }
                 {
                     let nuc = nuc.borrow();
                     let snap = nuc.snapshot();

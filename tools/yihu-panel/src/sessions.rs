@@ -102,6 +102,9 @@ pub struct PluginMgr {
     current_query: Option<(String, u64)>,
     /// 各插件对当前查询的最新结果（query_id, rows）；未超期的旧结果保留，避免闪烁
     latest: HashMap<String, (u64, Vec<PanelEntry>)>,
+    /// 各插件的声明关键词（manifest triggers，小写化）。宿主词头闸门与
+    /// 置顶的依据（BUG-012）：触发词是契约，宿主据它直判，不等插件自过滤
+    keywords: HashMap<String, Vec<String>>,
     /// WASM 插件后端（entry 以 .wasm 结尾的插件；架构终版 §4，双轨之一）
     wasm: crate::wasm_plugin::WasmRegistry,
     /// native 插件（kind="native"，M7/W6）：id → 入口 ELF 绝对路径。
@@ -126,6 +129,7 @@ impl PluginMgr {
             gen: 0,
             current_query: None,
             latest: HashMap::new(),
+            keywords: HashMap::new(),
             wasm: crate::wasm_plugin::WasmRegistry::default(),
             natives: HashMap::new(),
             context_files: Vec::new(),
@@ -162,8 +166,17 @@ impl PluginMgr {
         for e in errors {
             eprintln!("yihu-panel: 插件注册表问题：{e}");
         }
+        self.keywords.clear();
         for inst in installed {
             let id = inst.manifest.id.clone();
+            self.keywords.insert(
+                id.clone(),
+                inst.manifest
+                    .triggers
+                    .iter()
+                    .flat_map(|t| t.keywords.iter().map(|k| k.to_lowercase()))
+                    .collect(),
+            );
             if self.sessions.iter().any(|s| s.id == id)
                 || state.is_disabled(&id)
                 || self.disabled_by_failures.contains(&id)
@@ -761,13 +774,44 @@ impl PluginMgr {
         }
     }
 
-    /// 当前查询下全部插件结果行（应用按 id 稳定排序）。
+    /// 词头命中的插件结果行（置顶组，BUG-012）：manifest 触发词命中的
+    /// 插件是最高信号，宿主直判置顶，压过应用模糊匹配的噪声。
+    pub fn pinned_rows(&self) -> Vec<PanelEntry> {
+        self.split_rows().0
+    }
+
+    /// 其余插件结果行（附加组，应用按 id 稳定排序）：无关键词契约的插件
+    /// （仅 regex 触发/无触发词）的自过滤行。声明了关键词但本次未命中的
+    /// 行在闸门处直接丢弃——插件自过滤失控（对任意查询回错误行/噪声行，
+    /// csvkit 先例）不再污染搜索列表（BUG-012）。
+    /// 注意：keywords+regex 双声明的插件若将来出现，regex 命中也须纳入
+    /// 闸门放行，否则正则触发的行会被误杀；当前注册表无此形态。
     pub fn latest_rows(&self) -> Vec<PanelEntry> {
+        self.split_rows().1
+    }
+
+    fn split_rows(&self) -> (Vec<PanelEntry>, Vec<PanelEntry>) {
+        let query = self
+            .current_query
+            .as_ref()
+            .map(|(t, _)| t.as_str())
+            .unwrap_or("");
+        let mut pinned = Vec::new();
+        let mut rest = Vec::new();
         let mut ids: Vec<&String> = self.latest.keys().collect();
         ids.sort();
-        ids.into_iter()
-            .flat_map(|id| self.latest[id.as_str()].1.iter().cloned())
-            .collect()
+        for id in ids {
+            let rows = &self.latest[id.as_str()].1;
+            match self.keywords.get(id.as_str()) {
+                Some(kws) if !kws.is_empty() => {
+                    if keyword_hit(kws, query) {
+                        pinned.extend(rows.iter().cloned());
+                    }
+                }
+                _ => rest.extend(rows.iter().cloned()),
+            }
+        }
+        (pinned, rest)
     }
 
     /// 转发激活到来源插件（stdio 会话或 WASM 实例）。
@@ -845,6 +889,22 @@ impl PluginMgr {
             });
         }
     }
+}
+
+/// 宿主侧词头判定（BUG-012）：查询首词（小写）包含任一声明关键词即命中。
+/// 与 panel_entry mini 壳的匹配约定一致；只看首词——触发词是「呼出某插件」
+/// 的意图表达，散在句中的关键词不算。
+fn keyword_hit(keywords: &[String], text: &str) -> bool {
+    let first = text
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    !first.is_empty()
+        && keywords
+            .iter()
+            .any(|k| !k.is_empty() && first.contains(k.as_str()))
 }
 
 /// WASM 结果行 → 面板条目（broadcast 与能力回包刷新共用）
@@ -1234,6 +1294,42 @@ for line in sys.stdin:
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    #[test]
+    fn keyword_gate_pins_hits_and_drops_misses() {
+        // BUG-012：触发词命中的插件行置顶；声明了触发词但未命中的行被
+        // 宿主闸门丢弃（插件自过滤失控的噪声行不再进搜索列表）；
+        // 无关键词契约（regex/无触发词）的插件维持附加组
+        fn row(title: &str) -> PanelEntry {
+            PanelEntry {
+                title: title.into(),
+                subtitle: String::new(),
+                icon_spec: String::new(),
+                kind: "plugin",
+                payload: String::new(),
+            }
+        }
+        let mut mgr = PluginMgr::new();
+        mgr.current_query = Some(("md".into(), 1));
+        mgr.keywords.insert("mdworkbench".into(), vec!["md".into(), "markdown".into()]);
+        mgr.keywords.insert("csvkit".into(), vec!["csv".into()]);
+        mgr.keywords.insert("sticky".into(), vec![]);
+        mgr.latest.insert("mdworkbench".into(), (1, vec![row("MD行")]));
+        mgr.latest.insert("csvkit".into(), (1, vec![row("噪声行")]));
+        mgr.latest.insert("sticky".into(), (1, vec![row("附加行")]));
+        let pinned = mgr.pinned_rows();
+        assert_eq!(pinned.len(), 1, "{pinned:?}");
+        assert_eq!(pinned[0].title, "MD行");
+        let rest = mgr.latest_rows();
+        assert_eq!(rest.len(), 1, "{rest:?}");
+        assert_eq!(rest[0].title, "附加行");
+        // 触发词只看首词："md 笔记本" 命中，"hello" 不命中
+        mgr.current_query = Some(("md 笔记本".into(), 2));
+        assert_eq!(mgr.pinned_rows().len(), 1);
+        mgr.current_query = Some(("hello".into(), 3));
+        assert!(mgr.pinned_rows().is_empty());
+        assert_eq!(mgr.latest_rows().len(), 1);
     }
 
     /// fake-plugin：多能力声明（含带参）；plain-plugin：零权限 + 常驻

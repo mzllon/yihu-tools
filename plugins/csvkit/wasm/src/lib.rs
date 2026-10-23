@@ -390,7 +390,9 @@ impl yihu_wasm_runtime::QueryHandler for CsvkitWasm {
     // 输入格式：mode \x1f delim \x1f header \x1f text（宿主桥打包）
     let parts: Vec<&str> = text.split('\x1f').collect();
     if parts.len() < 4 {
-        return vec![Row::new("✗ 输入格式错误", "宿主桥打包异常", "")];
+        // 面板查询广播是用户原文，不带本插件结构化协议头：静默自过滤，
+        // 错误行不该进搜索列表（BUG-012）
+        return vec![];
     }
     let mode = parts[0];
     let delim_spec = parts[1];

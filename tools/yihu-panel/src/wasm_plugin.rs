@@ -241,22 +241,39 @@ impl WasmPlugin {
                 .unwrap_or_else(|| ".plugin.cwasm".into());
             stem.with_file_name(name)
         };
-        let module = match std::fs::read(&cache_path) {
-            Ok(bytes) => unsafe {
-                // SAFETY：缓存产物由同版本 wasmtime 序列化；版本不匹配会
-                // 反序列化失败，落到重新编译
-                Module::deserialize(&engine, &bytes)
-                    .or_else(|_| Module::from_file(&engine, wasm_path))
-                    .map_err(|e| format!("加载 {wasm_path:?}：{e}"))?
-            },
-            Err(_) => {
-                let m = Module::from_file(&engine, wasm_path)
-                    .map_err(|e| format!("加载 {wasm_path:?}：{e}"))?;
-                if let Ok(serialized) = m.serialize() {
-                    let _ = std::fs::write(&cache_path, serialized);
-                }
-                m
+        // 缓存新鲜度 = 缓存 mtime ≥ 源 wasm mtime：只看「缓存存在」会让
+        // 重编后的源 wasm 永远不生效（BUG-012 插件修复复验时实锤）
+        let cache_fresh = match (
+            std::fs::metadata(&cache_path),
+            std::fs::metadata(wasm_path),
+        ) {
+            (Ok(c), Ok(s)) => c
+                .modified()
+                .ok()
+                .zip(s.modified().ok())
+                .is_some_and(|(cm, sm)| cm >= sm),
+            _ => false,
+        };
+        let recompile = |engine: &Engine| -> Result<Module, String> {
+            let m = Module::from_file(engine, wasm_path)
+                .map_err(|e| format!("加载 {wasm_path:?}：{e}"))?;
+            if let Ok(serialized) = m.serialize() {
+                let _ = std::fs::write(&cache_path, serialized);
             }
+            Ok(m)
+        };
+        let module = if cache_fresh {
+            match std::fs::read(&cache_path) {
+                Ok(bytes) => unsafe {
+                    // SAFETY：缓存产物由同版本 wasmtime 序列化；版本不匹配会
+                    // 反序列化失败，落到重新编译
+                    Module::deserialize(&engine, &bytes)
+                        .or_else(|_| recompile(&engine))?
+                },
+                Err(_) => recompile(&engine)?,
+            }
+        } else {
+            recompile(&engine)?
         };
 
         // 装载期能力校验（能力即安全）：imports ⊆ manifest 声明
@@ -758,6 +775,30 @@ mod tests {
         }
         // 非本插件词头静默
         assert!(reg.query("mdworkbench", "hello").unwrap().is_empty());
+    }
+
+    #[test]
+    fn csvkit_sqlfmt_silence_on_plain_broadcast() {
+        // BUG-012：csvkit/sqlfmt 对面板查询广播（用户原文）静默自过滤，
+        // 不再回「✗ 输入格式错误/协议错位」噪声行；结构化协议输入仍出结果
+        for (name, structured) in [
+            ("csvkit", "c2j\x1fauto\x1f1\x1fname,age\nalice,30"),
+            ("sqlfmt", "fmt\x1fselect  a ,  b from t"),
+        ] {
+            let p = wasm_path(name);
+            if !p.exists() {
+                eprintln!("跳过：{name}.wasm 未构建");
+                continue;
+            }
+            let mut reg = WasmRegistry::default();
+            assert!(reg.ensure_loaded(name, &p, &[]).unwrap());
+            assert!(
+                reg.query(name, "md").unwrap().is_empty(),
+                "{name} 对无关查询应静默"
+            );
+            let rows = reg.query(name, structured).unwrap();
+            assert!(!rows.is_empty(), "{name} 结构化输入应有结果");
+        }
     }
 
     #[test]

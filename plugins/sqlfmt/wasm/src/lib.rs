@@ -300,7 +300,8 @@ impl QueryHandler for SqlfmtWasm {
         match mode {
             "fmt" => vec![Row::new("格式化 SQL", "点「复制」取全文", format_sql(sql))],
             "compact" => vec![Row::new("压缩 SQL", "点「复制」取全文", compact_sql(sql))],
-            _ => vec![Row::new("✗ 协议错位", "应为 fmt|compact + \x1f + sql", "")],
+            // 面板查询广播是用户原文：静默自过滤，错误行不进搜索列表（BUG-012）
+            _ => vec![],
         }
     }
 }
