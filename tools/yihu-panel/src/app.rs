@@ -1969,6 +1969,25 @@ fn gicon_for_spec(spec: &str) -> gio::Icon {
     }
 }
 
+/// desktop-id 尾段 → 匹配词（build_nucleo 第三段）。只收纯 ASCII 标识；
+/// snap 双段 id（firmware-updater_firmware-updater，名字重复两遍）折叠为
+/// 首段——重复字母把「mdw」这类短查询的子序列噪声面翻倍（BUG-012）。
+fn id_tail(payload: &str) -> Option<String> {
+    let t = payload.trim_end_matches(".desktop");
+    let mut tail = t.rsplit('.').next().unwrap_or(t);
+    if let Some((a, b)) = tail.split_once('_') {
+        if b.starts_with(a) {
+            tail = a;
+        }
+    }
+    let lower = tail.to_ascii_lowercase();
+    (lower.len() > 1
+        && lower
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then_some(lower)
+}
+
 fn build_nucleo(entries: &[PanelEntry]) -> nucleo::Nucleo<PanelEntry> {
     let notify: Arc<dyn Fn() + Sync + Send> = Arc::new(|| {});
     // 单列 haystack = 标题 + 拼音/首字母 + 英文 id 尾段（uTools 式拼音
@@ -1984,16 +2003,9 @@ fn build_nucleo(entries: &[PanelEntry]) -> nucleo::Nucleo<PanelEntry> {
             col.push_str(&item.title);
             col.push(' ');
             col.push_str(&crate::pinyin_index::match_column(&item.title));
-            let t = item.payload.trim_end_matches(".desktop");
-            let tail = t.rsplit('.').next().unwrap_or(t);
-            // 只收纯 ASCII 标识尾段，能力 payload（theme:dark 等）不含冒号进来
-            if tail.len() > 1
-                && tail
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
+            if let Some(tail) = id_tail(&item.payload) {
                 col.push(' ');
-                col.push_str(&tail.to_ascii_lowercase());
+                col.push_str(&tail);
             }
             cols[0] = col.into();
         });
@@ -2072,7 +2084,7 @@ fn selectable_at(store: &gio::ListStore, pos: u32) -> bool {
     store
         .item(pos)
         .and_downcast::<PanelItem>()
-        .map(|i| matches!(i.kind().as_str(), "app" | "cap" | "calc"))
+        .map(|i| matches!(i.kind().as_str(), "app" | "cap" | "calc" | "plugin"))
         .unwrap_or(false)
 }
 
@@ -2477,6 +2489,24 @@ fn apply_css() {
 
 #[cfg(test)]
 mod pinyin_search_tests {
+    #[test]
+    fn id_tail_folds_snap_duplicated_ids() {
+        // BUG-012 第二轮：snap 双段 id 折叠为首段；能力/非法 payload 返 None
+        assert_eq!(
+            id_tail("firmware-updater_firmware-updater.desktop").as_deref(),
+            Some("firmware-updater")
+        );
+        assert_eq!(
+            id_tail("firmware-updater_firmware-updater-app.desktop").as_deref(),
+            Some("firmware-updater")
+        );
+        assert_eq!(id_tail("org.gnome.Nautilus.desktop").as_deref(), Some("nautilus"));
+        // 非 snap 的下划线 id（后段不是前段的重复）保持原样
+        assert_eq!(id_tail("foo_bar.desktop").as_deref(), Some("foo_bar"));
+        assert_eq!(id_tail("theme:dark"), None);
+        assert_eq!(id_tail("a.desktop"), None);
+    }
+
     use super::*;
 
     fn entry(title: &str, payload: &str) -> PanelEntry {
