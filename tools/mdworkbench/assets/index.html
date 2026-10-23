@@ -1,129 +1,209 @@
 <!DOCTYPE html><html><head><meta charset="utf-8">
-<link rel="stylesheet" href="toastui-editor.min.css">
-<link rel="stylesheet" href="toastui-editor-dark.css">
-<style>html,body{margin:0;height:100%}#editor{height:100%}
+<link rel="stylesheet" href="vditor/index.css">
+<style>html,body{margin:0;height:100%;overflow:hidden}
+#editor{height:100%}
 body{font-family:system-ui,-apple-system,"Noto Sans CJK SC",sans-serif}
-body.darkbg{background:#121212}
-.mermaid{text-align:center;background:#fff;border-radius:4px;padding:8px}</style>
-</head><body><div id="editor"></div>
-<script src="toastui-editor-all.min.js"></script>
-<script src="toastui-editor-plugin-code-syntax-highlight-all.min.js"></script>
-<script src="mermaid.min.js"></script>
+body.darkbg{background:#1e1e1e}
+/* Typora 纸感：内容列居中限宽、舒适字号行距，编辑器本体无边框 */
+.vditor{border:none !important;border-radius:0}
+.vditor-reset{max-width:820px !important;margin:0 auto !important;padding:28px 44px !important;font-size:16px;line-height:1.65}
+#src{position:fixed;inset:0;width:100%;height:100%;border:none;outline:none;resize:none;
+     padding:28px 44px;box-sizing:border-box;font:14px/1.6 ui-monospace,monospace;
+     background:#fff;color:#24292f;tab-size:4}
+body.darkbg #src{background:#1e1e1e;color:#d4d4d4}
+#src[hidden]{display:none}
+</style>
+</head><body>
+<div id="editor"></div>
+<textarea id="src" hidden spellcheck="false" aria-label="源码模式"></textarea>
+<script src="vditor/index.min.js"></script>
 <script>
 function post(o){ try{ window.webkit.messageHandlers.yihu.postMessage(JSON.stringify(o)); }catch(e){} }
-function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-let currentDir = '';           // 当前 md 文件目录（相对图片解析为 file:// 显示）
-let pendingImage = {};         // id -> addImageBlobHook 回调
+let currentDir = '';           // 当前 md 文件目录（<base> 解析相对图片/链接）
+let mode = 'ir';               // 'ir' = 所见即所得（Vditor IR） | 'source' = 纯源码
 let imageId = 0;
+let pendingImage = {};         // id -> 图片原名
+let pendingMd = null;          // ready 前灌入的初稿
+let ready = false;             // lute 异步装载完成
 let changeTimer = null;
+const src = document.getElementById('src');
+const editorEl = document.getElementById('editor');
 
-mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+// 资产目录绝对地址：懒加载（lute/highlight/mermaid/i18n/主题 css）都从
+// ${cdn}/dist/... 取；不能用相对路径——<base> 会被 yihuSetDir 改指用户文档目录
+const ASSET_DIR = location.href.replace(/[^/]*$/, '');
 
-function fileUrl(src){
-  try { return new URL(encodeURI(src), 'file://' + currentDir + '/').href; }
-  catch(e){ return src; }
-}
-function refreshMermaid(){
-  try { mermaid.run({ querySelector: '#editor .mermaid' }); } catch(e){}
+function scheduleChange(){
+  if (changeTimer) return;
+  changeTimer = setTimeout(() => { changeTimer = null; post({type:'changed'}); postOutline(); }, 300);
 }
 function postOutline(){
+  const md = getMd();
   const items = [];
-  for (const line of editor.getMarkdown().split('\n')) {
+  for (const line of md.split('\n')) {
     const m = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
     if (m) items.push([m[1].length, m[2]]);
   }
   post({type:'outline', items});
 }
-const editor = new toastui.Editor({
-  el: document.getElementById('editor'),
+function getMd(){ return mode === 'source' ? src.value : editor.getValue(); }
+
+const editor = new Vditor('editor', {
   height: '100%',
-  initialEditType: 'wysiwyg',
-  previewStyle: 'tab',
-  usageStatistics: false,
-  hideModeSwitch: false,
-  plugins: [toastui.Editor.plugin.codeSyntaxHighlight],
-  customHTMLRenderer: {
-    codeBlock(node) {
-      const lang = (node.getLanguage && node.getLanguage()) || '';
-      if (lang === 'mermaid') {
-        return `<div class="mermaid">${escapeHtml(node.literal || '')}</div>`;
-      }
-      return false; // 其余交给语法高亮插件
-    },
-    image(node) {
-      const src = node.destination || '';
-      const alt = (node.getChildren && node.getChildren()[0] && node.getChildren()[0].getLiteral) || '';
-      if (src && !/^(https?:|data:|file:|\/\/)/.test(src) && currentDir) {
-        return `<img src="${fileUrl(src)}" alt="${escapeHtml(alt)}">`;
-      }
-      return `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}">`;
-    }
+  mode: 'ir',                   // Typora 同款：即时渲染，光标行显原文、离行融为版式
+  theme: 'classic',
+  lang: 'zh_CN',
+  cdn: ASSET_DIR,
+  toolbar: [],                  // 纸感：无常驻工具栏
+  typewriterMode: false,
+  cache: { enable: false },     // 草稿缓存关闭——文件管理在 Rust 侧
+  counter: { enable: false },
+  undoDelay: 200,
+  preview: { hljs: { style: 'github', lineNumber: false } },
+  value: '',
+  after: () => {
+    ready = true;
+    if (pendingMd !== null) { editor.setValue(pendingMd, false); pendingMd = null; }
+    post({type:'ready'});
   },
-  hooks: {
-    addImageBlobHook: (blob, cb) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const id = ++imageId;
-        pendingImage[id] = cb;
-        post({type:'image', id, name: blob.name || 'image.png', data: reader.result});
-      };
-      reader.readAsDataURL(blob);
-    }
-  },
-  events: {
-    change: () => {
-      if (changeTimer) return;
-      changeTimer = setTimeout(() => {
-        changeTimer = null;
-        post({type:'changed'});
-        postOutline();
-        refreshMermaid();
-      }, 300);
-    }
-  }
+  input: () => scheduleChange(),
 });
-window.yihuGetMd = () => editor.getMarkdown();
-window.yihuSetMd = (md) => { editor.setMarkdown(md, false); postOutline(); refreshMermaid(); };
-window.yihuSetMode = (m) => { editor.changeMode(m); };
-// Typora 同款：Ctrl+/ 在 所见即所得 ⇄ 源码 间切换（源码模式无分栏预览）
+
+function applyMd(md){
+  if (mode === 'source') { src.value = md; return; }
+  if (ready) {
+    editor.setValue(md, false);
+  } else {
+    pendingMd = md;             // lute 未就绪，灌稿推迟到 after()
+  }
+}
+
+function setMode(m){
+  if (m === mode) return;
+  if (m === 'source') {
+    src.value = editor.getValue();
+    editorEl.style.display = 'none';
+    src.hidden = false;
+    mode = 'source';
+    src.focus();
+  } else {
+    const md = src.value;
+    src.hidden = true;
+    editorEl.style.display = '';
+    applyMd(md);
+    mode = 'ir';
+  }
+  post({type:'changed'});
+  postOutline();
+}
+// Typora 同款：Ctrl+/ 在 所见即所得 ⇄ 源码 间切换
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && (e.key === '/' || e.code === 'Slash')) {
     e.preventDefault();
-    editor.changeMode(editor.currentMode() === 'wysiwyg' ? 'markdown' : 'wysiwyg');
+    setMode(mode === 'ir' ? 'source' : 'ir');
   }
 });
-window.yihuSetDir = (d) => { currentDir = d; editor.setMarkdown(editor.getMarkdown(), false); };
-window.yihuTheme = (m) => {
-  const root = document.querySelector('.toastui-editor-defaultUI');
-  const dark = m === 'dark' || (m === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
-  if (root) root.classList.toggle('toastui-editor-dark', dark);
-  document.body.classList.toggle('darkbg', dark);
-  mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default', securityLevel: 'loose' });
-  refreshMermaid();
+src.addEventListener('input', () => scheduleChange());
+
+// —— 图片粘贴/拖入：Rust 落盘到文档目录，回填相对路径 ——
+function handleImages(files){
+  const imgs = [...files].filter(f => f.type.startsWith('image/'));
+  if (!imgs.length) return false;
+  for (const f of imgs) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const id = ++imageId;
+      pendingImage[id] = f.name || 'image.png';
+      post({type:'image', id, name: f.name || 'image.png', data: reader.result});
+    };
+    reader.readAsDataURL(f);
+  }
+  return true;
+}
+document.addEventListener('paste', (e) => {
+  if (handleImages(e.clipboardData ? e.clipboardData.files : [])) e.preventDefault();
+});
+document.addEventListener('drop', (e) => {
+  if (handleImages(e.dataTransfer ? e.dataTransfer.files : [])) e.preventDefault();
+});
+
+// —— Rust 桥（契约与旧版一致）——
+window.yihuGetMd = () => getMd();
+window.yihuSetMd = (md) => {
+  if (mode === 'source') { src.value = md; return; }
+  applyMd(md);
+  scheduleChange();
 };
-window.yihuCount = (term) => editor.getMarkdown().split(term).length - 1;
+window.yihuSetMode = (m) => setMode(m);
+window.yihuSetDir = (d) => {
+  currentDir = d || '';
+  let base = document.querySelector('base');
+  if (currentDir) {
+    const href = 'file://' + currentDir.replace(/\/?$/, '/');
+    if (!base) { base = document.createElement('base'); document.head.appendChild(base); }
+    base.href = href;
+  } else if (base) {
+    base.remove();
+  }
+};
+window.yihuTheme = (m) => {
+  const dark = m === 'dark' || (m === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.body.classList.toggle('darkbg', dark);
+  editor.setTheme(dark ? 'dark' : 'classic', dark ? 'dark' : 'light', dark ? 'github-dark' : 'github');
+};
+window.yihuCount = (term) => getMd().split(term).length - 1;
 window.yihuFindNext = (term) => {
-  if (editor.currentMode() === 'wysiwyg') { try { return window.find(term); } catch(e){ return false; } }
-  return false;
+  if (mode === 'source') {
+    const v = src.value;
+    let i = v.indexOf(term, src.selectionEnd || 0);
+    if (i < 0) i = v.indexOf(term);
+    if (i < 0) return false;
+    src.focus();
+    src.setSelectionRange(i, i + term.length);
+    return true;
+  }
+  try { return window.find(term); } catch(err){ return false; }
 };
 window.yihuReplaceAll = (term, repl) => {
-  const md = editor.getMarkdown();
+  const md = getMd();
   const n = term ? md.split(term).length - 1 : 0;
-  if (n > 0) { editor.setMarkdown(md.split(term).join(repl), false); }
+  if (n > 0) { applyMd(md.split(term).join(repl)); }
   return n;
 };
 window.yihuScrollHeading = (idx) => {
-  const go = () => {
+  if (mode === 'source') {
+    const lines = src.value.split('\n');
+    let n = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^#{1,6}\s/.test(lines[i])) {
+        n++;
+        if (n === idx) {
+          src.focus();
+          const pos = lines.slice(0, i).join('\n').length + (i ? 1 : 0);
+          src.setSelectionRange(pos, pos);
+          return;
+        }
+      }
+    }
+    return;
+  }
+  try {
     const hs = document.querySelectorAll('#editor h1,#editor h2,#editor h3,#editor h4,#editor h5,#editor h6');
     if (hs[idx]) hs[idx].scrollIntoView({block:'start'});
-  };
-  if (editor.currentMode() !== 'wysiwyg') { editor.changeMode('wysiwyg'); setTimeout(go, 150); }
-  else go();
+  } catch(err){}
 };
 window.yihuImageSaved = (id, path) => {
-  const cb = pendingImage[id];
-  if (cb) { cb(path); delete pendingImage[id]; }
+  const name = pendingImage[id];
+  delete pendingImage[id];
+  if (name === undefined) return;
+  const md = '![' + name.replace(/[\[\]]/g, '') + '](' + path + ')';
+  if (mode === 'source') {
+    const pos = src.selectionEnd || src.value.length;
+    src.value = src.value.slice(0, pos) + md + src.value.slice(pos);
+    scheduleChange();
+  } else {
+    editor.insertValue(md);
+  }
 };
-post({type:'ready'});
 </script></body></html>

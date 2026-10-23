@@ -25,16 +25,29 @@ use webkit6::prelude::*;
 use webkit6::{PrintOperation, UserContentManager, WebView};
 
 const APP_ID: &str = "tools.yihu.mdworkbench";
+// 主编辑器 = Vditor IR（Typora 形态内核，BUG-013 方向 B）：index.min.js +
+// 懒加载子集（lute 必需、highlight/mermaid/i18n/内容主题按需）。cdn 指向
+// 落盘目录绝对地址，懒加载路径 ${cdn}/dist/... 必须保持此布局。
+const VDITOR_JS: &[u8] = include_bytes!("../assets/vditor/index.min.js");
+const VDITOR_CSS: &[u8] = include_bytes!("../assets/vditor/index.css");
+const LUTE_JS: &[u8] = include_bytes!("../assets/dist/js/lute/lute.min.js");
+const HLJS_JS: &[u8] = include_bytes!("../assets/dist/js/highlight.js/highlight.min.js");
+const HLJS_GITHUB_CSS: &[u8] =
+    include_bytes!("../assets/dist/js/highlight.js/styles/github.min.css");
+const HLJS_GITHUB_DARK_CSS: &[u8] =
+    include_bytes!("../assets/dist/js/highlight.js/styles/github-dark.min.css");
+const MERMAID_JS: &[u8] = include_bytes!("../assets/dist/js/mermaid/mermaid.min.js");
+const I18N_ZH_CN: &[u8] = include_bytes!("../assets/dist/js/i18n/zh_CN.js");
+const CONTENT_LIGHT_CSS: &[u8] = include_bytes!("../assets/dist/css/content-theme/light.css");
+const CONTENT_DARK_CSS: &[u8] = include_bytes!("../assets/dist/css/content-theme/dark.css");
+// toastui 三件仅剩便签窗 sticky.html 在用
 const EDITOR_JS: &[u8] = include_bytes!("../assets/toastui-editor-all.min.js");
 const EDITOR_CSS: &[u8] = include_bytes!("../assets/toastui-editor.min.css");
 const DARK_CSS: &[u8] = include_bytes!("../assets/toastui-editor-dark.css");
-const HIGHLIGHT_JS: &[u8] =
-    include_bytes!("../assets/toastui-editor-plugin-code-syntax-highlight-all.min.js");
-const MERMAID_JS: &[u8] = include_bytes!("../assets/mermaid.min.js");
 const STICKY_HTML: &str = include_str!("../assets/sticky.html");
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 
-const WELCOME: &str = "# 欢迎使用 Markdown 工作台\n\n直接开始输入 —— 这是**所见即所得**编辑器。\n\n- 默认所见即所得，Ctrl+/ 或右下角「Markdown」标签可切到源码模式\n- 表格、任务列表、删除线都支持\n- 顶部按钮：打开文件夹、保存、导出\n";
+const WELCOME: &str = "# 欢迎使用 Markdown 工作台\n\n直接开始输入 —— 这是**所见即所得**编辑器。\n\n- 默认即时渲染（Typora 手感），Ctrl+/ 切到纯源码模式\n- 表格、任务列表、删除线都支持\n- 顶部按钮：打开文件夹、保存、导出\n";
 
 struct State {
     window: ApplicationWindow,
@@ -296,17 +309,33 @@ fn install_assets() -> Result<PathBuf, String> {
     let dir = glib::user_data_dir().join("yihu").join("md-editor");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建资产目录失败：{e}"))?;
     for (name, bytes) in [
+        ("vditor/index.min.js", VDITOR_JS),
+        ("vditor/index.css", VDITOR_CSS),
+        ("dist/js/lute/lute.min.js", LUTE_JS),
+        ("dist/js/highlight.js/highlight.min.js", HLJS_JS),
+        (
+            "dist/js/highlight.js/styles/github.min.css",
+            HLJS_GITHUB_CSS,
+        ),
+        (
+            "dist/js/highlight.js/styles/github-dark.min.css",
+            HLJS_GITHUB_DARK_CSS,
+        ),
+        ("dist/js/mermaid/mermaid.min.js", MERMAID_JS),
+        ("dist/js/i18n/zh_CN.js", I18N_ZH_CN),
+        ("dist/css/content-theme/light.css", CONTENT_LIGHT_CSS),
+        ("dist/css/content-theme/dark.css", CONTENT_DARK_CSS),
+        // toastui 三件：便签窗 sticky.html 专用
         ("toastui-editor-all.min.js", EDITOR_JS),
         ("toastui-editor.min.css", EDITOR_CSS),
         ("toastui-editor-dark.css", DARK_CSS),
-        (
-            "toastui-editor-plugin-code-syntax-highlight-all.min.js",
-            HIGHLIGHT_JS,
-        ),
-        ("mermaid.min.js", MERMAID_JS),
         ("sticky.html", STICKY_HTML.as_bytes()),
     ] {
         let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建资产目录失败：{e}"))?;
+        }
         let same = std::fs::read(&path).map(|old| old == bytes).unwrap_or(false);
         if !same {
             std::fs::write(&path, bytes).map_err(|e| format!("写资产失败：{e}"))?;
